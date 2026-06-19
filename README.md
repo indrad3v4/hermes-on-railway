@@ -70,3 +70,4 @@ hermes model
 ```
 
 Or set a default model via `~/.hermes/config.yaml` if needed.
+# deployed via GitHub
