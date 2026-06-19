@@ -3,7 +3,7 @@ FROM debian:13-slim
 # System dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl git \
+        ca-certificates curl git xz-utils \
         python3-venv python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
