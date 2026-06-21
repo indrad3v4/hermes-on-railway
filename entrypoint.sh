@@ -51,6 +51,44 @@ fi
 echo "→ Verifying Hermes..."
 hermes --version 2>&1 || { echo "ERROR: Hermes not found"; exit 1; }
 
+# ── Railway-safe feature gating ─────────────────────────────────────────
+# Disable heavy/optional features that cause instability on Railway.
+# These env vars are read by Hermes at runtime; if a var is not
+# recognized, it is silently ignored (no-op).
+echo "→ Applying Railway-safe defaults..."
+
+# Browser / computer-use: already skipped at install, but also gate at runtime
+export HERMES_DISABLE_BROWSER="${HERMES_DISABLE_BROWSER:-true}"
+export HERMES_DISABLE_COMPUTER_USE="${HERMES_DISABLE_COMPUTER_USE:-true}"
+export HERMES_DISABLE_BROWSER_CDP="${HERMES_DISABLE_BROWSER_CDP:-true}"
+
+# Mixture-of-agents: disable to avoid 429 retry storms on free-tier models
+export HERMES_DISABLE_MOA="${HERMES_DISABLE_MOA:-true}"
+export HERMES_MOA_MAX_RETRIES="${HERMES_MOA_MAX_RETRIES:-1}"
+
+# Self-improvement / background review loops: disable to reduce memory churn
+export HERMES_DISABLE_SELF_IMPROVEMENT="${HERMES_DISABLE_SELF_IMPROVEMENT:-true}"
+export HERMES_SELF_IMPROVEMENT_INTERVAL="${HERMES_SELF_IMPROVEMENT_INTERVAL:-0}"
+
+# Security tools: disable tirith to avoid timeout noise
+export HERMES_DISABLE_TIRITH="${HERMES_DISABLE_TIRITH:-true}"
+
+# Memory: keep default limit but log if overridden
+if [ -n "${HERMES_MEMORY_MAX_CHARS}" ]; then
+    echo "   HERMES_MEMORY_MAX_CHARS: ${HERMES_MEMORY_MAX_CHARS}"
+fi
+
+echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=off, tirith=off)"
+
+# ── Telegram polling conflict mitigation ────────────────────────────────
+# On Railway restarts, a stale getUpdates session may still be held open
+# on Telegram's servers. Delete any cached offset file so the new session
+# starts fresh and does not fight the old one.
+if [ -f "$HERMES_HOME/telegram_offset" ]; then
+    echo "→ Clearing stale Telegram offset file..."
+    rm -f "$HERMES_HOME/telegram_offset"
+fi
+
 # ── Start gateway ───────────────────────────────────────────────────────
 echo "→ Starting Hermes Telegram gateway (polling mode)..."
 exec hermes gateway run
