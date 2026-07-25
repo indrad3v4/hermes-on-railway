@@ -71,3 +71,10 @@ hermes model
 
 Or set a default model via `~/.hermes/config.yaml` if needed.
 # deployed via GitHub
+
+---
+
+<p align="center">
+  <sub>built by <a href="https://github.com/indrad3v4">indradev_</a> · 
+  <a href="https://buymeacoffee.com/indradev_">☕ support</a></sub>
+</p>
