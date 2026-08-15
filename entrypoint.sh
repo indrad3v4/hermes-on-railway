@@ -47,6 +47,18 @@ else
     echo "   TELEGRAM_ALLOWED_USERS: not set (any user can interact)"
 fi
 
+# ── Telegram proxy (fix: Railway network may block api.telegram.org) ────
+# If api.telegram.org is unreachable, Hermes loops on DNS-over-HTTPS
+# fallback with "Any cannot be instantiated" errors.
+# Set TELEGRAM_PROXY in Railway Variables (e.g. socks5://host:port or
+# http://host:port) to route Telegram traffic through a proxy.
+if [ -n "$TELEGRAM_PROXY" ]; then
+    echo "TELEGRAM_PROXY=$TELEGRAM_PROXY" >> "$ENV_FILE"
+    echo "   TELEGRAM_PROXY: configured (routing via proxy)"
+else
+    echo "   TELEGRAM_PROXY: not set — if Telegram is unreachable, set this variable"
+fi
+
 # ── Verify installation ─────────────────────────────────────────────────
 echo "→ Verifying Hermes..."
 hermes --version 2>&1 || { echo "ERROR: Hermes not found"; exit 1; }
