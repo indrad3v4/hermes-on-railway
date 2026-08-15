@@ -33,6 +33,17 @@ RUN if [ ! -e /usr/local/bin/hermes ]; then \
     fi && \
     /usr/local/bin/hermes --version
 
+# ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
+# Upstream bug NousResearch/hermes-agent#85272: Hermes v0.20.x ships
+# python-telegram-bot 22.8; the Telegram adapter's deferred SDK import
+# (check_telegram_requirements) never rebinds TypeHandler, which stays
+# typing.Any → "TypeError: Any cannot be instantiated" at handler
+# registration → gateway boots with no connected platforms (cron only).
+# 22.6 is the confirmed-good pin per the upstream issue.
+# TODO: unpin after upstream PR #85421 merges and Hermes is updated here.
+RUN /usr/local/lib/hermes-agent/venv/bin/pip install --no-cache-dir \
+    'python-telegram-bot[webhooks]==22.6'
+
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /start.sh /entrypoint.sh
