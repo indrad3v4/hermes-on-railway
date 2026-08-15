@@ -25,7 +25,8 @@ chmod 600 "$ENV_FILE"
 # Detect which provider keys are set (log names only, never values)
 PROVIDER_KEYS=""
 for VAR in OPENROUTER_API_KEY ANTHROPIC_API_KEY STEPFUN_API_KEY \
-           OPENAI_API_KEY HF_TOKEN GEMINI_API_KEY DEEPSEEK_API_KEY; do
+           OPENAI_API_KEY HF_TOKEN GEMINI_API_KEY DEEPSEEK_API_KEY \
+           FIRECRAWL_API_KEY GITHUB_TOKEN; do
     if [ -n "${!VAR}" ]; then
         echo "${VAR}=${!VAR}" >> "$ENV_FILE"
         PROVIDER_KEYS="${PROVIDER_KEYS} ${VAR}"
@@ -57,6 +58,67 @@ if [ -n "$TELEGRAM_PROXY" ]; then
     echo "   TELEGRAM_PROXY: configured (routing via proxy)"
 else
     echo "   TELEGRAM_PROXY: not set — if Telegram is unreachable, set this variable"
+fi
+
+# ── state.db pre-flight: auto-repair before the gateway opens it ────────
+# Incident 2026-08-15: full/corrupt state volume left state.db with page-
+# level corruption (freelist). Reads worked, every write failed, Hermes
+# looped on "run hermes doctor". This block detects and repairs that
+# failure class on every boot. Never blocks boot — worst case we start
+# with a fresh db.
+DB="$HERMES_HOME/state.db"
+if [ -f "$DB" ]; then
+    echo "→ state.db pre-flight check..."
+    if python3 - "$DB" <<'PYEOF'
+import sqlite3, sys
+try:
+    con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    ok = con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    con.close()
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PYEOF
+    then
+        echo "   state.db: healthy"
+    else
+        TS=$(date +%Y%m%d_%H%M%S)
+        echo "   ⚠ state.db corrupt — attempting VACUUM INTO rescue (preserves messages)..."
+        if python3 - "$DB" "$HERMES_HOME/state_rescued.db" <<'PYEOF'
+import sqlite3, sys
+try:
+    con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    con.execute(f"VACUUM INTO '{sys.argv[2]}'")
+    con.close()
+    chk = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    ok = chk.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    n = chk.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+    chk.close()
+    print(f'   rescue integrity ok, {n} messages preserved')
+    sys.exit(0 if ok else 1)
+except Exception as e:
+    print(f'   rescue failed: {e}')
+    sys.exit(1)
+PYEOF
+        then
+            cp "$DB" "$HERMES_HOME/state.db.corrupt-$TS" || true
+            rm -f "$HERMES_HOME/state.db-wal" "$HERMES_HOME/state.db-shm"
+            mv "$HERMES_HOME/state_rescued.db" "$DB"
+            echo "   ✓ state.db rescued in place (corrupt copy: state.db.corrupt-$TS)"
+        else
+            BACKUP=$(ls -t "$HERMES_HOME"/state.db.bak* 2>/dev/null | head -1)
+            cp "$DB" "$HERMES_HOME/state.db.corrupt-$TS" || true
+            rm -f "$HERMES_HOME/state.db-wal" "$HERMES_HOME/state.db-shm"
+            if [ -n "$BACKUP" ]; then
+                cp "$BACKUP" "$DB"
+                echo "   ✓ restored from backup: $BACKUP"
+            else
+                rm -f "$DB"
+                echo "   ⚠ no rescue, no backup — starting with fresh state.db"
+                echo "     (sessions/messages lost; memories in ~/.hermes/memories survive)"
+            fi
+        fi
+    fi
 fi
 
 # ── Verify installation ─────────────────────────────────────────────────
