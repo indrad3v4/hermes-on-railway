@@ -154,6 +154,14 @@ fi
 
 echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=off, tirith=off)"
 
+# ── Root gateway opt-in ─────────────────────────────────────────────────
+# Hermes v0.20.1+ refuses to run the gateway as root when it detects the
+# official-image layout (/opt/hermes). On Railway the container runs as
+# root by default and the volume ($HERMES_HOME) is root-owned anyway —
+# there is no non-root user to break, so the risk the guard warns about
+# does not apply. Opt in explicitly.
+export HERMES_ALLOW_ROOT_GATEWAY="${HERMES_ALLOW_ROOT_GATEWAY:-1}"
+
 # ── Telegram polling conflict mitigation ────────────────────────────────
 # On Railway restarts, a stale getUpdates session may still be held open
 # on Telegram's servers. Delete any cached offset file so the new session
