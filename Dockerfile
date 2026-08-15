@@ -41,8 +41,34 @@ RUN if [ ! -e /usr/local/bin/hermes ]; then \
 # registration → gateway boots with no connected platforms (cron only).
 # 22.6 is the confirmed-good pin per the upstream issue.
 # TODO: unpin after upstream PR #85421 merges and Hermes is updated here.
-RUN /usr/local/lib/hermes-agent/venv/bin/pip install --no-cache-dir \
-    'python-telegram-bot[webhooks]==22.6'
+#
+# NOTE: the installer can bail early on Railway (tolerated above), so the
+# venv path is not guaranteed. Discover pip dynamically instead of
+# hardcoding it — and fail the build loudly if no pip is found, because a
+# silent skip here means Telegram stays broken (issue #1).
+RUN set -e; \
+    PIP=""; \
+    for p in \
+        /usr/local/lib/hermes-agent/venv/bin/pip \
+        /root/.hermes/hermes-agent/venv/bin/pip \
+        /root/.local/share/hermes/venv/bin/pip; do \
+      if [ -x "$p" ]; then PIP="$p"; break; fi; \
+    done; \
+    if [ -z "$PIP" ]; then \
+      PIP=$(find /usr/local/lib /root/.hermes /root/.local -maxdepth 6 -path '*/venv/bin/pip' -type f 2>/dev/null | head -1); \
+    fi; \
+    if [ -z "$PIP" ] && command -v hermes >/dev/null 2>&1; then \
+      HERMES_BIN=$(readlink -f "$(command -v hermes)"); \
+      CAND="$(dirname "$HERMES_BIN")/pip"; \
+      [ -x "$CAND" ] && PIP="$CAND"; \
+    fi; \
+    if [ -z "$PIP" ]; then \
+      echo "ERROR: no pip found in any Hermes venv — cannot pin python-telegram-bot." >&2; \
+      exit 1; \
+    fi; \
+    echo "→ Using pip: $PIP"; \
+    "$PIP" install --no-cache-dir 'python-telegram-bot[webhooks]==22.6'; \
+    "$PIP" show python-telegram-bot | head -2
 
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
