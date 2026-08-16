@@ -5,7 +5,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git xz-utils \
         python3-venv python3-pip \
-        ripgrep ffmpeg gh && \
+        ripgrep ffmpeg gh build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Node.js 22 (web dashboard UI build) ─────────────────────────────────
