@@ -5,7 +5,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git xz-utils \
         python3-venv python3-pip \
-        ripgrep ffmpeg && \
+        ripgrep ffmpeg gh && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Hermes Agent: deterministic clone-and-install ───────────────────────
