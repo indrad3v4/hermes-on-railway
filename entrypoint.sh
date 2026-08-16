@@ -48,6 +48,27 @@ else
     echo "   TELEGRAM_ALLOWED_USERS: not set (any user can interact)"
 fi
 
+# ── Git/GitHub agent tooling self-healing ────────────────────────────────
+# /root (overlay) is wiped on redeploy — gh stays (Dockerfile), but git
+# config + credentials die with it. Recreate from GH_TOKEN/GITHUB_TOKEN so
+# agent git workflows keep working in every fresh container.
+if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
+    GHTOK="${GITHUB_TOKEN:-$GH_TOKEN}"
+    GH_LOGIN=$(curl -s -H "Authorization: Bearer $GHTOK" \
+        https://api.github.com/user \
+        | python3 -c "import sys,json;print(json.load(sys.stdin).get('login',''))" 2>/dev/null || true)
+    if [ -n "$GH_LOGIN" ]; then
+        git config --global user.name "$GH_LOGIN"
+        git config --global user.email "$GH_LOGIN@users.noreply.github.com"
+        git config --global credential.helper store
+        printf 'https://x-access-token:%s@github.com\n' "$GHTOK" > "$HOME/.git-credentials"
+        chmod 600 "$HOME/.git-credentials"
+        echo "   git credentials configured for $GH_LOGIN (token: ${GITHUB_TOKEN:+GITHUB_TOKEN}${GH_TOKEN:+GH_TOKEN})"
+    else
+        echo "   ⚠ GH_TOKEN/GITHUB_TOKEN present but invalid — git credentials NOT configured"
+    fi
+fi
+
 # ── Telegram proxy (fix: Railway network may block api.telegram.org) ────
 # If api.telegram.org is unreachable, Hermes loops on DNS-over-HTTPS
 # fallback with "Any cannot be instantiated" errors.
