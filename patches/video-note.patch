@@ -1,0 +1,32 @@
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index 6a6fb54..1d88efc 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -9881,6 +9881,27 @@ class TelegramAdapter(BasePlatformAdapter):
+                 logger.warning("[Telegram] Failed to cache video: %s", _redact_telegram_error_text(e), exc_info=True)
+                 await self._surface_media_cache_failure(msg, event, "video file", e)
+ 
++        elif msg.video_note:
++            # Round video messages (video_note / "кружок") were previously
++            # ignored — the handler only covered photo/voice/audio/video/document.
++            # video_note is always MP4; mirror the msg.video branch.
++            try:
++                allowed, note = self._telegram_media_size_allowed(msg.video_note, "video message")
++                if not allowed:
++                    event.text = self._append_observed_note(event.text, note or "")
++                    logger.info("[Telegram] Skipped oversized user video note (size=%s)", getattr(msg.video_note, "file_size", None))
++                    await self.handle_message(event)
++                    return
++                file_obj = await msg.video_note.get_file()
++                video_bytes = await file_obj.download_as_bytearray()
++                cached_path = cache_video_from_bytes(bytes(video_bytes), ext=".mp4")
++                event.media_urls = [cached_path]
++                event.media_types = ["video/mp4"]
++                logger.info("[Telegram] Cached user video note at %s", cached_path)
++            except Exception as e:
++                logger.warning("[Telegram] Failed to cache video note: %s", _redact_telegram_error_text(e), exc_info=True)
++                await self._surface_media_cache_failure(msg, event, "video message", e)
++
+         # Download document files to cache for agent processing
+         elif msg.document:
+             doc = msg.document

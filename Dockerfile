@@ -28,6 +28,15 @@ ARG HERMES_REF=main
 RUN git clone --depth 1 --branch "$HERMES_REF" \
     https://github.com/NousResearch/hermes-agent.git /opt/hermes
 
+# ── Apply local patches to upstream code ────────────────────────────────
+# video-note.patch: Telegram adapter previously IGNORED round video messages
+# (video_note / "кружок") — only photo/voice/audio/video/document were cached.
+# Adds a msg.video_note branch mirroring msg.video (always MP4). Patch must
+# apply cleanly to HERMES_REF or the build fails loudly (never silently).
+COPY patches/ /opt/patches/
+RUN git -C /opt/hermes apply /opt/patches/video-note.patch && \
+    echo "Applied: video-note.patch"
+
 RUN python3 -m venv /opt/hermes/venv && \
     /opt/hermes/venv/bin/pip install --no-cache-dir --upgrade pip && \
     /opt/hermes/venv/bin/pip install --no-cache-dir -e '/opt/hermes[messaging]' && \
