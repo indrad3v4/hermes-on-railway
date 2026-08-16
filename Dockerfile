@@ -8,6 +8,14 @@ RUN apt-get update && \
         ripgrep ffmpeg gh && \
     rm -rf /var/lib/apt/lists/*
 
+# ── Node.js 22 (web dashboard UI build) ─────────────────────────────────
+# /opt/hermes/web requires node >= 22.22.0 and npm < 11.10.0 or >= 11.17.0;
+# Debian's nodejs (v20) fails the engine check (EBADENGINE). Binary tarball
+# is deterministic and avoids the NodeSource apt repo.
+RUN curl -fsSL https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz | \
+        tar -xJ -C /usr/local --strip-components=1 && \
+    node -v && npm -v
+
 # ── Hermes Agent: deterministic clone-and-install ───────────────────────
 # Replaces the install.sh approach: the installer exits non-zero on
 # Railway's builder (optional Node/browser deps), and Docker layer caching
