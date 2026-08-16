@@ -30,7 +30,8 @@ RUN git clone --depth 1 --branch "$HERMES_REF" \
 
 RUN python3 -m venv /opt/hermes/venv && \
     /opt/hermes/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/hermes/venv/bin/pip install --no-cache-dir -e '/opt/hermes[messaging]'
+    /opt/hermes/venv/bin/pip install --no-cache-dir -e '/opt/hermes[messaging]' && \
+    /opt/hermes/venv/bin/pip install --no-cache-dir pymupdf python-docx
 
 # ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
 # Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
