@@ -46,6 +46,21 @@ RUN /opt/hermes/venv/bin/pip install --no-cache-dir \
 RUN ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes && \
     /usr/local/bin/hermes --version
 
+# ── SQLite 3.53.4 (WAL-reset corruption fix) ──────────────────────────────
+# Debian trixie ships libsqlite3-0 3.46.1, vulnerable to the WAL-reset bug
+# (https://sqlite.org/wal.html#walresetbug); Hermes warns at startup for
+# state.db / delivery_ledger / cron executions.db. Compile the amalgamation
+# and install over the system lib so python's sqlite3 module links >= 3.51.3.
+# SONAME stays libsqlite3.so.0 (ABI-compatible); build-essential provides gcc.
+RUN curl -fsSL https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o /tmp/sq.zip && \
+    python3 -c "import zipfile; zipfile.ZipFile('/tmp/sq.zip').extractall('/tmp')" && \
+    cd /tmp/sqlite-amalgamation-3530400 && \
+    gcc -O2 -fPIC -shared -o libsqlite3.so.0 sqlite3.c -ldl -lpthread -lm && \
+    cp libsqlite3.so.0 /usr/lib/x86_64-linux-gnu/ && \
+    ldconfig && \
+    rm -rf /tmp/sq.zip /tmp/sqlite-amalgamation-* && \
+    /opt/hermes/venv/bin/python -c "import sqlite3; print('SQLite:', sqlite3.sqlite_version)"
+
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /start.sh /entrypoint.sh
