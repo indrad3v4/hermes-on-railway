@@ -146,6 +146,14 @@ fi
 echo "→ Verifying Hermes..."
 hermes --version 2>&1 || { echo "ERROR: Hermes not found"; exit 1; }
 
+# ── HF cache durability ────────────────────────────────────────────────
+# /root/.cache is EPHEMERAL (overlay) — wiped on every redeploy, so the
+# faster-whisper STT model (1.5 GB) re-downloads after every deploy.
+# Point HF caches at the durable volume so the model survives redeploys.
+export HF_HOME="${HF_HOME:-$HERMES_HOME/hf-cache}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HERMES_HOME/hf-cache/hub}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HERMES_HOME/hf-cache/hub}"
+
 # ── Railway-safe feature gating ─────────────────────────────────────────
 # Disable heavy/optional features that cause instability on Railway.
 # These env vars are read by Hermes at runtime; if a var is not
