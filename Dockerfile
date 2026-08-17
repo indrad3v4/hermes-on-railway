@@ -28,6 +28,13 @@ RUN uv python install 3.12 && \
     uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         -e '/opt/hermes[messaging]'
 
+# ── Bake local ML/doc packages into venv ────────────────────────────────
+# faster-whisper: local STT (voice notes) — was lost on redeploy (a180c22).
+# librosa: voice_prosody.py affect analysis (energy/F0/register).
+# pymupdf + python-docx: triz RAG ingest (PDF/DOCX) (58d9f23).
+RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
+        pymupdf python-docx faster-whisper librosa
+
 # ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
 # Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
 # python-telegram-bot 22.8, which routes the Telegram adapter through the
