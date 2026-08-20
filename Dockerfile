@@ -32,8 +32,9 @@ RUN uv python install 3.12 && \
 # faster-whisper: local STT (voice notes) — was lost on redeploy (a180c22).
 # librosa: voice_prosody.py affect analysis (energy/F0/register).
 # pymupdf + python-docx: triz RAG ingest (PDF/DOCX) (58d9f23).
+# cometapi: official CometAPI SDK for vision_analyze.py (vision-insight) — added 2026-08-20.
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
-        pymupdf python-docx faster-whisper librosa
+        pymupdf python-docx faster-whisper librosa cometapi
 
 # ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
 # Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
