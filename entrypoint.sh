@@ -166,7 +166,17 @@ if [ -n "${HERMES_MEMORY_MAX_CHARS}" ]; then
     echo "   HERMES_MEMORY_MAX_CHARS: ${HERMES_MEMORY_MAX_CHARS}"
 fi
 
-echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=off, tirith=off)"
+# ── Tool-loop circuit breaker (unattended gateway) ──────────────────────
+# Official docs (2026): hard_stop_enabled defaults to false, which is
+# safe for interactive CLI sessions but dangerous for headless gateway
+# deployments — the agent can loop forever on repeated tool failures.
+# Enable the circuit breaker so Railway's restart policy can kick in.
+# Override with HERMES_TOOL_LOOP_HARD_STOP=false if you want warnings-only.
+export HERMES_TOOL_LOOP_HARD_STOP="${HERMES_TOOL_LOOP_HARD_STOP:-true}"
+export HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE="${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE:-5}"
+export HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT="${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT:-5}"
+
+echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
 
 # ── Root gateway opt-in ─────────────────────────────────────────────────
 # Hermes v0.20.1+ refuses to run the gateway as root when it detects the
@@ -180,6 +190,24 @@ export HERMES_ALLOW_ROOT_GATEWAY="${HERMES_ALLOW_ROOT_GATEWAY:-1}"
 # Allow up to 15 seconds for the Telegram adapter to establish its first
 # connection before Hermes declares the gateway unhealthy.
 export HERMES_TELEGRAM_INIT_TIMEOUT="${HERMES_TELEGRAM_INIT_TIMEOUT:-15}"
+
+# ── API server (healthcheck endpoint) ───────────────────────────────────
+# Exposes :8642/health for Railway health monitoring and external tools.
+# API_SERVER_KEY must be >= 8 chars (Hermes requirement). Generate from
+# urandom if not set in Railway Variables.
+export API_SERVER_ENABLED="${API_SERVER_ENABLED:-true}"
+export API_SERVER_HOST="${API_SERVER_HOST:-0.0.0.0}"
+if [ -z "${API_SERVER_KEY:-}" ]; then
+    export API_SERVER_KEY=$(python3 -c \
+        "import os; print(os.urandom(24).hex())" 2>/dev/null || echo "hermes-railway-default-key-2026")
+    echo "   API_SERVER_KEY: auto-generated (not set in Railway Variables)"
+else
+    echo "   API_SERVER_KEY: set via Railway Variables"
+fi
+# Write API server settings to .env so Hermes runtime picks them up
+echo "API_SERVER_ENABLED=${API_SERVER_ENABLED}" >> "$ENV_FILE"
+echo "API_SERVER_HOST=${API_SERVER_HOST}" >> "$ENV_FILE"
+echo "API_SERVER_KEY=${API_SERVER_KEY}" >> "$ENV_FILE"
 
 # ── Telegram polling conflict mitigation ────────────────────────────────
 # On Railway restarts, a stale getUpdates session may still be held open
@@ -228,9 +256,22 @@ fi
 DISK_FREE=$(df -h "$HERMES_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "?")
 echo "│  Disk free: $DISK_FREE on $HERMES_HOME"
 
+# API server
+echo "│  API srv  : :8642/health (API_SERVER_ENABLED=${API_SERVER_ENABLED})"
+
+# Tool-loop circuit breaker
+echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP} (exact=${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE}, idempotent=${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT})"
+
 # Telegram init timeout
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
+
+# TODO(arch): Official nousresearch/hermes-agent:latest now uses s6-overlay
+# as PID 1 (not tini). When migrating to the official base image, remove
+# the tini ENTRYPOINT from Dockerfile and update entrypoint.sh accordingly.
+# Ref: https://hermes-agent.nousresearch.com/docs/user-guide/docker/
+echo "│  Init sys : tini (tech debt: migrate to s6 on official image)"
+
 echo "└─────────────────────────────────────────────────────"
 echo ""
 
