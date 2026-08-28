@@ -22,21 +22,33 @@ echo "→ Writing secrets to .env..."
 : > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-# Detect which provider keys are set (log names only, never values)
+# Nous Portal / Nous API — primary and only provider for this deployment.
+# NOUS_PORTAL_TOKEN: issued at portal.nousresearch.com (OAuth)
+# NOUS_API_KEY: issued at nousresearch.com/api (direct API)
+# At least one must be set for Hermes to reach Nous models.
 PROVIDER_KEYS=""
-for VAR in OPENROUTER_API_KEY ANTHROPIC_API_KEY STEPFUN_API_KEY \
-           OPENAI_API_KEY HF_TOKEN GEMINI_API_KEY DEEPSEEK_API_KEY \
-           FIRECRAWL_API_KEY GITHUB_TOKEN; do
+for VAR in NOUS_PORTAL_TOKEN NOUS_API_KEY \
+           HF_TOKEN FIRECRAWL_API_KEY GITHUB_TOKEN; do
     if [ -n "${!VAR}" ]; then
         echo "${VAR}=${!VAR}" >> "$ENV_FILE"
         PROVIDER_KEYS="${PROVIDER_KEYS} ${VAR}"
     fi
 done
 
+# Safety: keys that would enable non-Nous providers are intentionally
+# excluded from the .env export cycle. If they exist in Railway Variables
+# they remain available to Railway infrastructure but are NOT passed to
+# Hermes runtime. This prevents automatic fallback to CometAPI, OpenRouter,
+# OpenAI, or StepFun.
+# Excluded: OPENROUTER_API_KEY ANTHROPIC_API_KEY STEPFUN_API_KEY
+#           OPENAI_API_KEY COMETAPI_API_KEY COMETAPI_KEY
+
 if [ -n "$PROVIDER_KEYS" ]; then
     echo "   Detected provider keys:${PROVIDER_KEYS}"
 else
-    echo "   WARNING: No provider API key detected. Hermes default model may not work."
+    echo "   WARNING: No Nous provider key detected (NOUS_PORTAL_TOKEN or NOUS_API_KEY)."
+    echo "            Hermes cannot reach Nous Portal models without at least one of these."
+    echo "            Set NOUS_PORTAL_TOKEN or NOUS_API_KEY in Railway Variables."
 fi
 
 # Telegram credentials
@@ -81,12 +93,11 @@ else
     echo "   TELEGRAM_PROXY: not set — if Telegram is unreachable, set this variable"
 fi
 
-# ── state.db pre-flight: auto-repair before the gateway opens it ────────
-# Incident 2026-08-15: full/corrupt state volume left state.db with page-
-# level corruption (freelist). Reads worked, every write failed, Hermes
-# looped on "run hermes doctor". This block detects and repairs that
-# failure class on every boot. Never blocks boot — worst case we start
-# with a fresh db.
+# ── state.db pre-flight: non-destructive integrity check ────────────────
+# Policy (2026-08-29): never auto-delete or auto-overwrite state.db.
+# On corruption: backup only, then HALT with a clear message.
+# Recovery to a new DB requires manual operator confirmation.
+# See OPERATIONS.md §5 for the recovery procedure.
 DB="$HERMES_HOME/state.db"
 if [ -f "$DB" ]; then
     echo "→ state.db pre-flight check..."
@@ -104,41 +115,15 @@ PYEOF
         echo "   state.db: healthy"
     else
         TS=$(date +%Y%m%d_%H%M%S)
-        echo "   ⚠ state.db corrupt — attempting VACUUM INTO rescue (preserves messages)..."
-        if python3 - "$DB" "$HERMES_HOME/state_rescued.db" <<'PYEOF'
-import sqlite3, sys
-try:
-    con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    con.execute(f"VACUUM INTO '{sys.argv[2]}'")
-    con.close()
-    chk = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
-    ok = chk.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-    n = chk.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
-    chk.close()
-    print(f'   rescue integrity ok, {n} messages preserved')
-    sys.exit(0 if ok else 1)
-except Exception as e:
-    print(f'   rescue failed: {e}')
-    sys.exit(1)
-PYEOF
-        then
-            cp "$DB" "$HERMES_HOME/state.db.corrupt-$TS" || true
-            rm -f "$HERMES_HOME/state.db-wal" "$HERMES_HOME/state.db-shm"
-            mv "$HERMES_HOME/state_rescued.db" "$DB"
-            echo "   ✓ state.db rescued in place (corrupt copy: state.db.corrupt-$TS)"
-        else
-            BACKUP=$(ls -t "$HERMES_HOME"/state.db.bak* 2>/dev/null | head -1)
-            cp "$DB" "$HERMES_HOME/state.db.corrupt-$TS" || true
-            rm -f "$HERMES_HOME/state.db-wal" "$HERMES_HOME/state.db-shm"
-            if [ -n "$BACKUP" ]; then
-                cp "$BACKUP" "$DB"
-                echo "   ✓ restored from backup: $BACKUP"
-            else
-                rm -f "$DB"
-                echo "   ⚠ no rescue, no backup — starting with fresh state.db"
-                echo "     (sessions/messages lost; memories in ~/.hermes/memories survive)"
-            fi
-        fi
+        BACKUP="$HERMES_HOME/state.db.corrupt-$TS"
+        echo "   ✗ state.db integrity check FAILED."
+        echo "   → Backing up to: $BACKUP"
+        cp "$DB" "$BACKUP" 2>/dev/null || true
+        echo "   ✗ HALTING. state.db is corrupt and requires manual recovery."
+        echo "     Do NOT delete state.db automatically — data may be recoverable."
+        echo "     Run the recovery procedure in OPERATIONS.md §5, then redeploy."
+        echo "     Backup saved at: $BACKUP"
+        exit 1
     fi
 fi
 
@@ -191,6 +176,11 @@ echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=o
 # does not apply. Opt in explicitly.
 export HERMES_ALLOW_ROOT_GATEWAY="${HERMES_ALLOW_ROOT_GATEWAY:-1}"
 
+# ── Telegram init timeout ────────────────────────────────────────────────
+# Allow up to 15 seconds for the Telegram adapter to establish its first
+# connection before Hermes declares the gateway unhealthy.
+export HERMES_TELEGRAM_INIT_TIMEOUT="${HERMES_TELEGRAM_INIT_TIMEOUT:-15}"
+
 # ── Telegram polling conflict mitigation ────────────────────────────────
 # On Railway restarts, a stale getUpdates session may still be held open
 # on Telegram's servers. Delete any cached offset file so the new session
@@ -199,6 +189,50 @@ if [ -f "$HERMES_HOME/telegram_offset" ]; then
     echo "→ Clearing stale Telegram offset file..."
     rm -f "$HERMES_HOME/telegram_offset"
 fi
+
+# ── Startup diagnostic (no secrets) ─────────────────────────────────────
+echo ""
+echo "┌─────────────────────────────────────────────────────"
+echo "│  HERMES STARTUP DIAGNOSTIC"
+echo "├─────────────────────────────────────────────────────"
+
+# Provider
+if [ -n "$NOUS_PORTAL_TOKEN" ]; then
+    echo "│  Provider : Nous Portal (NOUS_PORTAL_TOKEN set)"
+elif [ -n "$NOUS_API_KEY" ]; then
+    echo "│  Provider : Nous API (NOUS_API_KEY set)"
+else
+    echo "│  Provider : ⚠ NONE — no Nous key found"
+fi
+
+# Non-Nous providers — warn loudly if they are present in env
+for EXCLUDED in OPENROUTER_API_KEY OPENAI_API_KEY STEPFUN_API_KEY COMETAPI_API_KEY COMETAPI_KEY; do
+    if [ -n "${!EXCLUDED}" ]; then
+        echo "│  ⚠ EXCLUDED KEY IN RAILWAY ENV: $EXCLUDED (NOT passed to Hermes)"
+    fi
+done
+
+# SQLite version
+SQLITE_VER=$(/opt/hermes/venv/bin/python -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
+echo "│  SQLite   : $SQLITE_VER"
+
+# state.db
+if [ -f "$DB" ]; then
+    DB_SIZE=$(du -sh "$DB" 2>/dev/null | cut -f1 || echo "?")
+    echo "│  state.db : present ($DB_SIZE)"
+else
+    echo "│  state.db : not present (fresh start)"
+fi
+
+# Disk space
+DISK_FREE=$(df -h "$HERMES_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "?")
+echo "│  Disk free: $DISK_FREE on $HERMES_HOME"
+
+# Telegram init timeout
+echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
+echo "│  Gateway  : polling mode (one replica)"
+echo "└─────────────────────────────────────────────────────"
+echo ""
 
 # ── Start gateway ───────────────────────────────────────────────────────
 echo "→ Starting Hermes Telegram gateway (polling mode)..."

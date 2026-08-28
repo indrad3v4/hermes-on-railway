@@ -32,9 +32,11 @@ RUN uv python install 3.12 && \
 # faster-whisper: local STT (voice notes) — was lost on redeploy (a180c22).
 # librosa: voice_prosody.py affect analysis (energy/F0/register).
 # pymupdf + python-docx: triz RAG ingest (PDF/DOCX) (58d9f23).
-# cometapi: official CometAPI SDK for vision_analyze.py (vision-insight) — added 2026-08-20.
+# NOTE: cometapi SDK intentionally removed — vision-insight now routes
+# exclusively through Nous Portal. CometAPI must not be an automatic
+# fallback or auxiliary provider in this deployment.
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
-        pymupdf python-docx faster-whisper librosa cometapi
+        pymupdf python-docx faster-whisper librosa
 
 # ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
 # Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
@@ -54,6 +56,14 @@ RUN /opt/hermes/venv/bin/python -c \
     "import sqlite3; v=tuple(map(int, sqlite3.sqlite_version.split('.'))); \
      assert v >= (3, 51, 3), f'Vulnerable SQLite {sqlite3.sqlite_version} — WAL-reset bug'; \
      print('SQLite', sqlite3.sqlite_version, 'OK (WAL-reset patched)')"
+
+# ── Build-time guard: cometapi must NOT be importable in venv ────────────
+# Ensures no code path can accidentally import and initialise CometAPI.
+RUN /opt/hermes/venv/bin/python -c \
+    "import importlib.util; \
+     assert importlib.util.find_spec('cometapi') is None, \
+     'cometapi SDK found in venv — remove it (CometAPI must not be active)'; \
+     print('cometapi: not present in venv (OK)')"
 
 RUN ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes && \
     /usr/local/bin/hermes --version
