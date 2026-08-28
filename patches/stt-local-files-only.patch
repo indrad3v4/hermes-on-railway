@@ -1,0 +1,49 @@
+diff --git a/tools/transcription_tools.py b/tools/transcription_tools.py
+index 53fa074..1178788 100644
+--- a/tools/transcription_tools.py
++++ b/tools/transcription_tools.py
+@@ -1784,15 +1784,22 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
+         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+ 
+     from faster_whisper import WhisperModel
++    # Path-based models (stt.local.model: /opt/hermes-models/turbo) fail with
++    # "Repo id must be in the form ..." unless local_files_only=True (verified
++    # 2026-08-28 on this box). Model names (tiny/base/small/medium/large-v3)
++    # keep default download behaviour.
++    _lfo = os.path.isdir(model_name)
+     if force_cpu:
+         logger.info(
+             "Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
+             "(int8) to avoid native device autodetection crashes"
+         )
+-        return WhisperModel(model_name, device="cpu", compute_type="int8")
++        return WhisperModel(model_name, device="cpu", compute_type="int8",
++                            local_files_only=_lfo)
+ 
+     try:
+-        return WhisperModel(model_name, device=device, compute_type=compute_type)
++        return WhisperModel(model_name, device=device, compute_type=compute_type,
++                            local_files_only=_lfo)
+     except Exception as exc:
+         if not _looks_like_cuda_lib_error(exc):
+             raise
+@@ -1801,7 +1808,8 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
+             "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.",
+             exc,
+         )
+-        return WhisperModel(model_name, device="cpu", compute_type="int8")
++        return WhisperModel(model_name, device="cpu", compute_type="int8",
++                            local_files_only=_lfo)
+ 
+ 
+ # Silence-hallucination hardening defaults for local faster-whisper.
+@@ -2005,7 +2013,8 @@ def _transcribe_local(
+                 exc,
+             )
+             from faster_whisper import WhisperModel
+-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
++            model = WhisperModel(model_name, device="cpu", compute_type="int8",
++                                 local_files_only=os.path.isdir(model_name))
+             with _local_model_lock:
+                 _local_model = model
+                 _local_model_name = model_name

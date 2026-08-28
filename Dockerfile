@@ -58,6 +58,19 @@ RUN /opt/hermes/venv/bin/python -c \
 RUN ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes && \
     /usr/local/bin/hermes --version
 
+# ── Apply local patches to upstream code ────────────────────────────────
+# 1. video-note.patch: Telegram adapter previously IGNORED round video
+#    messages (кружок) — restores video_note handling.
+# 2. stt-local-files-only.patch (2026-08-28): path-based STT models
+#    (stt.local.model: /opt/hermes-models/turbo) failed with "Repo id must
+#    be in the form ..." — pass local_files_only=True for directory paths so
+#    voice transcription uses the local turbo model instead of erroring out.
+COPY patches/ /opt/patches/
+RUN git -C /opt/hermes apply /opt/patches/video-note.patch && \
+    echo "Applied: video-note.patch" && \
+    git -C /opt/hermes apply /opt/patches/stt-local-files-only.patch && \
+    echo "Applied: stt-local-files-only.patch"
+
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /start.sh /entrypoint.sh
