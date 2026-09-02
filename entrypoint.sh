@@ -16,6 +16,7 @@ fi
 
 # ── Ensure ~/.hermes exists ─────────────────────────────────────────────
 mkdir -p "$HERMES_HOME"
+mkdir -p "$HERMES_HOME/bin"
 
 # ── Write secrets to .env ───────────────────────────────────────────────
 echo "→ Writing secrets to .env..."
@@ -139,16 +140,72 @@ export HF_HOME="${HF_HOME:-$HERMES_HOME/hf-cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HERMES_HOME/hf-cache/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HERMES_HOME/hf-cache/hub}"
 
+# ── browser-use CLI: repair symlink into /root/.hermes/bin ───────────────
+# The Dockerfile installs browser-use as a uv tool at build time, but
+# /root/.hermes/bin lives on a durable Railway volume that is mounted
+# AFTER the image layers are built. Re-run the install at container start
+# so the CLI entry-point is always present on the volume-backed path.
+export UV_TOOL_BIN_DIR="$HERMES_HOME/bin"
+if ! command -v browser-use &>/dev/null && ! [ -x "$HERMES_HOME/bin/browser-use" ]; then
+    echo "→ Repairing browser-use CLI symlink in $HERMES_HOME/bin..."
+    uv tool install --force browser-use --quiet 2>&1 || \
+        echo "   ⚠ browser-use reinstall failed (non-fatal — Chromium still available)"
+fi
+
+# ── Launch headless Chromium CDP on 127.0.0.1:9222 ──────────────────────
+# Hermes web_browsing tools require a running CDP endpoint.
+# We background Chromium before starting the gateway and wait for it.
+CDP_PORT=${HERMES_BROWSER_CDP_PORT:-9222}
+CDP_DATA_DIR=/tmp/bu-cdp
+
+echo "→ Starting headless Chromium CDP on 127.0.0.1:${CDP_PORT}..."
+mkdir -p "$CDP_DATA_DIR"
+
+chromium \
+    --headless=new \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --remote-debugging-address=127.0.0.1 \
+    --remote-debugging-port=${CDP_PORT} \
+    --user-data-dir="$CDP_DATA_DIR" \
+    --no-first-run \
+    --disable-extensions \
+    &>/tmp/chromium-cdp.log &
+CHROMIUM_PID=$!
+
+# Wait up to 20 s for CDP /json/version to respond
+CDP_READY=0
+for i in $(seq 1 20); do
+    if curl -sf "http://127.0.0.1:${CDP_PORT}/json/version" -o /dev/null 2>/dev/null; then
+        CDP_READY=1
+        echo "   ✓ Chromium CDP ready in ${i}s (pid $CHROMIUM_PID)"
+        break
+    fi
+    sleep 1
+done
+
+if [ "$CDP_READY" -eq 0 ]; then
+    echo "   ⚠ Chromium CDP did not come up within 20s — browser tools may be unavailable"
+    echo "     Last log lines:"
+    tail -5 /tmp/chromium-cdp.log 2>/dev/null || true
+    # Non-fatal: gateway still starts; browsing tools will report unavailable
+fi
+
 # ── Railway-safe feature gating ─────────────────────────────────────────
 # Disable heavy/optional features that cause instability on Railway.
 # These env vars are read by Hermes at runtime; if a var is not
 # recognized, it is silently ignored (no-op).
 echo "→ Applying Railway-safe defaults..."
 
-# Browser / computer-use: already skipped at install, but also gate at runtime
-export HERMES_DISABLE_BROWSER="${HERMES_DISABLE_BROWSER:-true}"
-export HERMES_DISABLE_COMPUTER_USE="${HERMES_DISABLE_COMPUTER_USE:-true}"
-export HERMES_DISABLE_BROWSER_CDP="${HERMES_DISABLE_BROWSER_CDP:-true}"
+# Browser / computer-use: CDP is now running — enable browser tools.
+# Allow override via Railway Variables (set to true to re-disable).
+export HERMES_DISABLE_BROWSER="${HERMES_DISABLE_BROWSER:-false}"
+export HERMES_DISABLE_COMPUTER_USE="${HERMES_DISABLE_COMPUTER_USE:-false}"
+export HERMES_DISABLE_BROWSER_CDP="${HERMES_DISABLE_BROWSER_CDP:-false}"
+
+# Write CDP endpoint so Hermes tools know where to connect
+export HERMES_BROWSER_CDP_URL="${HERMES_BROWSER_CDP_URL:-http://127.0.0.1:${CDP_PORT}}"
 
 # Mixture-of-agents: disable to avoid 429 retry storms on free-tier models
 export HERMES_DISABLE_MOA="${HERMES_DISABLE_MOA:-true}"
@@ -176,7 +233,7 @@ export HERMES_TOOL_LOOP_HARD_STOP="${HERMES_TOOL_LOOP_HARD_STOP:-true}"
 export HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE="${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE:-5}"
 export HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT="${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT:-5}"
 
-echo "   Railway-safe defaults applied (browser=off, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
+echo "   Railway-safe defaults applied (browser=ON cdp=ON, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
 
 # ── Root gateway opt-in ─────────────────────────────────────────────────
 # Hermes v0.20.1+ refuses to run the gateway as root when it detects the
@@ -265,6 +322,13 @@ echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP} (
 # Telegram init timeout
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
+
+# CDP status
+if [ "${CDP_READY:-0}" -eq 1 ]; then
+    echo "│  Browser  : Chromium CDP ✓ http://127.0.0.1:${CDP_PORT} (pid ${CHROMIUM_PID})"
+else
+    echo "│  Browser  : Chromium CDP ✗ not ready (tools will be unavailable)"
+fi
 
 # TODO(arch): Official nousresearch/hermes-agent:latest now uses s6-overlay
 # as PID 1 (not tini). When migrating to the official base image, remove

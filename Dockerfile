@@ -1,10 +1,11 @@
 FROM debian:13-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 
-# Base tools.
+# Base tools + headless Chromium.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git xz-utils \
-        ripgrep ffmpeg && \
+        ripgrep ffmpeg \
+        chromium chromium-driver && \
     rm -rf /var/lib/apt/lists/*
 
 # ── uv + uv-managed Python ──────────────────────────────────────────────
@@ -32,11 +33,16 @@ RUN uv python install 3.12 && \
 # faster-whisper: local STT (voice notes) — was lost on redeploy (a180c22).
 # librosa: voice_prosody.py affect analysis (energy/F0/register).
 # pymupdf + python-docx: triz RAG ingest (PDF/DOCX) (58d9f23).
+# browser-use: headless browser automation (Hermes web_browsing stack).
 # NOTE: cometapi SDK intentionally removed — vision-insight now routes
 # exclusively through Nous Portal. CometAPI must not be an automatic
 # fallback or auxiliary provider in this deployment.
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
-        pymupdf python-docx faster-whisper librosa
+        pymupdf python-docx faster-whisper librosa browser-use
+
+# ── browser-use CLI tool (for /root/.hermes/bin symlink) ─────────────────
+ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
+RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
 
 # ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
 # Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
