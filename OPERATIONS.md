@@ -159,3 +159,65 @@ Railway → your service → Deployments → Redeploy
 - [ ] SQLite version in diagnostic is >= 3.51.3
 - [ ] state.db healthy (no integrity error in logs)
 - [ ] Disk free is > 200 MB on the Hermes volume
+
+---
+
+## 8. Browser CDP verification
+
+Chromium CDP runs **inside the container only**, bound to `127.0.0.1:9222`.
+It is intentionally never exposed on a public port.
+
+### Confirm CDP is alive
+
+```bash
+curl -s http://127.0.0.1:9222/json/version
+```
+
+Expected: JSON object with `Browser`, `Protocol-Version`, `User-Agent`,
+and `webSocketDebuggerUrl` fields.
+If this returns nothing or connection refused, Chromium is not running —
+check `/tmp/chromium-cdp.log` for the failure reason.
+
+### Confirm browser.cdp_url is written to config
+
+```bash
+grep -A5 '^browser:' ~/.hermes/config.yaml || echo "(no browser: section found)"
+```
+
+Expected output includes:
+```
+browser:
+  cdp_url: http://127.0.0.1:9222
+```
+
+If the line is missing, `entrypoint.sh` did not reach the CDP-ready block.
+Check startup logs for `✓ Chromium CDP ready` and `✓ browser.cdp_url configured`.
+
+### Functional browser_exec test
+
+```bash
+hermes chat -q "Use browser_exec only. Open https://example.com and return the page title. Do not use web_extract or any HTTP-fetch fallback."
+```
+
+Expected result: agent returns `Example Domain` (the actual `<title>` of
+https://example.com), retrieved via `browser_exec`, **not** via `web_extract`.
+
+If the agent still falls back to `web_extract` or says "Chrome isn't running":
+1. Verify `curl -s http://127.0.0.1:9222/json/version` returns valid JSON.
+2. Verify `grep -A5 '^browser:' ~/.hermes/config.yaml` shows `cdp_url`.
+3. Check startup logs for `⚠ Chromium CDP did not come up` or Python errors.
+4. If CDP is up but `browser_exec` still auto-launches: confirm the installed
+   Hermes version supports `browser.cdp_url` — run `hermes --version` and
+   compare to the `HERMES_REF` in `Dockerfile` (currently `main`).
+
+### Runtime env cross-check
+
+```bash
+tr '\0' '\n' < /proc/1/environ | grep -E '^(BROWSER_CDP_URL|HERMES_BROWSER_CDP_URL|HERMES_DISABLE_BROWSER|HERMES_DISABLE_BROWSER_CDP)='
+```
+
+### Security reminder
+
+**Never expose TCP 9222 (or any CDP port) on a public Railway port.**
+CDP has no authentication. All access must remain on `127.0.0.1` loopback.
+Do not add port 9222 to Railway's public networking configuration.

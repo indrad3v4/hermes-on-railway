@@ -192,6 +192,83 @@ if [ "$CDP_READY" -eq 0 ]; then
     # Non-fatal: gateway still starts; browsing tools will report unavailable
 fi
 
+# ── Write browser.cdp_url into ~/.hermes/config.yaml ────────────────────
+# Canonical upstream config key (NousResearch/hermes-agent docs, browser
+# automation section). This is what browser_exec, browser_cdp and the
+# built-in browser tools read to attach to an existing CDP endpoint
+# instead of auto-launching a second Chrome.
+#
+# Rules:
+#   - Only runs when Chromium CDP confirmed ready above.
+#   - Uses /opt/hermes/venv/bin/python (no python3 in Railway PATH).
+#   - Idempotent: adds or updates only the browser.cdp_url key.
+#   - Never overwrites unrelated keys or comments.
+#   - Never exposes CDP on 0.0.0.0; URL is always 127.0.0.1:$CDP_PORT.
+if [ "${CDP_READY}" -eq 1 ]; then
+    echo "→ Writing browser.cdp_url to $HERMES_HOME/config.yaml..."
+    /opt/hermes/venv/bin/python - <<PYEOF
+import sys, os, re
+
+config_path = os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'config.yaml')
+cdp_url = f"http://127.0.0.1:{os.environ.get('CDP_PORT', '9222')}"
+cdp_line = f"  cdp_url: {cdp_url}\n"
+
+# Read existing config or start with empty string
+try:
+    with open(config_path, 'r') as f:
+        content = f.read()
+except FileNotFoundError:
+    content = ''
+
+lines = content.splitlines(keepends=True)
+
+# Strategy: find existing 'browser:' section and update/insert cdp_url
+# If no browser: section exists, append one.
+in_browser = False
+browser_section_start = None
+cdp_url_line_idx = None
+browser_end_idx = None  # first non-browser-indented line after section start
+
+for idx, line in enumerate(lines):
+    stripped = line.rstrip('\n')
+    if re.match(r'^browser:\s*$', stripped):
+        in_browser = True
+        browser_section_start = idx
+        continue
+    if in_browser:
+        # A line that starts at column 0 (and is not blank/comment) ends the section
+        if stripped and not stripped.startswith(' ') and not stripped.startswith('#'):
+            browser_end_idx = idx
+            in_browser = False
+            continue
+        if re.match(r'^  cdp_url:', stripped):
+            cdp_url_line_idx = idx
+
+if browser_section_start is None:
+    # No browser: section — append it
+    if content and not content.endswith('\n'):
+        content += '\n'
+    content += 'browser:\n' + cdp_line
+elif cdp_url_line_idx is not None:
+    # Update existing cdp_url line
+    lines[cdp_url_line_idx] = cdp_line
+    content = ''.join(lines)
+else:
+    # browser: section exists but no cdp_url — insert after browser: line
+    lines.insert(browser_section_start + 1, cdp_line)
+    content = ''.join(lines)
+
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, 'w') as f:
+    f.write(content)
+
+print(f'   browser.cdp_url = {cdp_url} written to {config_path}')
+PYEOF
+    echo "   ✓ browser.cdp_url configured"
+else
+    echo "   ⚠ Skipping browser.cdp_url write — Chromium CDP not ready"
+fi
+
 # ── Railway-safe feature gating ─────────────────────────────────────────
 # Disable heavy/optional features that cause instability on Railway.
 # These env vars are read by Hermes at runtime; if a var is not
@@ -204,7 +281,7 @@ export HERMES_DISABLE_BROWSER="${HERMES_DISABLE_BROWSER:-false}"
 export HERMES_DISABLE_COMPUTER_USE="${HERMES_DISABLE_COMPUTER_USE:-false}"
 export HERMES_DISABLE_BROWSER_CDP="${HERMES_DISABLE_BROWSER_CDP:-false}"
 
-# Write CDP endpoint so Hermes tools know where to connect
+# HERMES_BROWSER_CDP_URL kept for any internal env-var reader in older builds.
 export HERMES_BROWSER_CDP_URL="${HERMES_BROWSER_CDP_URL:-http://127.0.0.1:${CDP_PORT}}"
 
 # Mixture-of-agents: disable to avoid 429 retry storms on free-tier models
@@ -326,6 +403,7 @@ echo "│  Gateway  : polling mode (one replica)"
 # CDP status
 if [ "${CDP_READY:-0}" -eq 1 ]; then
     echo "│  Browser  : Chromium CDP ✓ http://127.0.0.1:${CDP_PORT} (pid ${CHROMIUM_PID})"
+    echo "│  CDP cfg  : browser.cdp_url written to config.yaml"
 else
     echo "│  Browser  : Chromium CDP ✗ not ready (tools will be unavailable)"
 fi
