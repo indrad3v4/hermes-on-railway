@@ -1,0 +1,59 @@
+Description
+===========
+Fixes: ⏳ Draining 1 active agent(s) before restart... hanging indefinitely
+
+Root cause
+----------
+1. deepseek/deepseek-v4-flash via Nous hits HTTP 429 (rate limited)
+2. Fallback stepfun/step-3.7-flash:free via Nous ALSO hits HTTP 429
+3. conversation_loop retries 3x with no exponential backoff
+4. Stuck agent never resolves → drain never completes → /restart hangs forever
+
+Fix summary
+-----------
+Three new env vars injected via entrypoint.sh BEFORE `exec hermes gateway run`:
+
+  HERMES_DRAIN_TIMEOUT_SECONDS=30
+    Hard kill agents still alive after N seconds during drain.
+    Prevents infinite /restart hangs. Hermes reads this natively.
+
+  HERMES_RATE_LIMIT_BACKOFF_BASE=2
+    Base multiplier for exponential backoff on RateLimitError (seconds).
+    Retry 1: ~2s, Retry 2: ~4s, Retry 3: ~8s.
+
+  HERMES_RATE_LIMIT_MAX_RETRIES=2
+    Reduce max retries from 3 to 2 on rate-limited providers to fail
+    faster and let the drain complete.
+
+Apply
+-----
+This patch documents the env var additions. The actual change is in
+entrypoint.sh — see the section '── Rate-limit resilience & drain timeout'
+added before 'exec hermes gateway run'.
+
+To apply manually in entrypoint.sh, add before the final exec line:
+
+  # ── Rate-limit resilience & drain timeout ───────────────────────────────
+  # Fixes: /restart hangs when Nous rate-limits both primary and fallback model.
+  # HERMES_DRAIN_TIMEOUT_SECONDS: hard-kill agents still alive after N seconds.
+  # HERMES_RATE_LIMIT_BACKOFF_BASE: exponential backoff base in seconds.
+  # HERMES_RATE_LIMIT_MAX_RETRIES: max retries on 429 (lower = faster drain).
+  export HERMES_DRAIN_TIMEOUT_SECONDS="${HERMES_DRAIN_TIMEOUT_SECONDS:-30}"
+  export HERMES_RATE_LIMIT_BACKOFF_BASE="${HERMES_RATE_LIMIT_BACKOFF_BASE:-2}"
+  export HERMES_RATE_LIMIT_MAX_RETRIES="${HERMES_RATE_LIMIT_MAX_RETRIES:-2}"
+  echo "   Rate-limit resilience: backoff_base=${HERMES_RATE_LIMIT_BACKOFF_BASE}s, max_retries=${HERMES_RATE_LIMIT_MAX_RETRIES}, drain_timeout=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
+
+Verification
+------------
+1. After deploy: /restart should complete within 30 seconds
+2. Logs should show 'Rate-limit resilience: backoff_base=2s ...'
+3. On 429: logs show retry delays (2s, 4s) instead of instant retry storm
+4. Drain no longer blocks indefinitely
+
+Related logs (2026-09-06)
+--------------------------
+09:03 ERROR  Streaming failed before delivery: rate limited (deepseek-v4-flash)
+09:03 WARNING API call failed attempt 1/3 RateLimitError provider=nous model=deepseek/deepseek-v4-flash
+09:31 ERROR  Streaming failed before delivery: rate limited (step-3.7-flash:free)
+09:31 WARNING API call failed attempt 1/3 RateLimitError provider=nous model=stepfun/step-3.7-flash:free
+=> BOTH primary and fallback exhausted => agent stuck => drain hangs
