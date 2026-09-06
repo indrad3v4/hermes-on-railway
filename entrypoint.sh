@@ -374,6 +374,60 @@ export HERMES_RATE_LIMIT_BACKOFF_BASE="${HERMES_RATE_LIMIT_BACKOFF_BASE:-2}"
 export HERMES_RATE_LIMIT_MAX_RETRIES="${HERMES_RATE_LIMIT_MAX_RETRIES:-2}"
 echo "   Rate-limit resilience: backoff_base=${HERMES_RATE_LIMIT_BACKOFF_BASE}s, max_retries=${HERMES_RATE_LIMIT_MAX_RETRIES}, drain_timeout=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
 
+# ── Primary model restore (sticky-fallback prevention) ──────────────────
+# PROBLEM: When Hermes exhausts its fallback chain during a rate-limited
+# turn, it may write the last-used fallback model back to config.yaml as
+# the new primary. On the next container start the gateway launches with
+# upstage/solar-pro4:free (or another free model) instead of the intended
+# paid primary. After credits are refilled, DeepSeek is never used.
+#
+# FIX: At every startup, idempotently restore the top-level `model:` block
+# to the paid primary BEFORE starting the gateway.
+#
+# WHAT THIS DOES NOT CHANGE:
+#   - fallback_providers: cascade is preserved exactly as-is in config.yaml
+#   - All other config.yaml keys are untouched
+#   - At runtime, if the primary 429s, Hermes still cascades through:
+#       stepfun/step-3.7-flash:free → poolside/laguna-s-2.1:free
+#       → meituan/longcat-2.0:free → upstage/solar-pro4:free
+#   - On the NEXT container start (after credits refill), primary = DeepSeek again
+echo "→ Restoring primary model (sticky-fallback prevention)..."
+/opt/hermes/venv/bin/python - <<'PYEOF'
+from pathlib import Path
+import re, os
+
+config_path = Path(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes'))) / 'config.yaml'
+if not config_path.exists():
+    print("   config.yaml not found — skipping primary restore (fresh install)")
+    raise SystemExit(0)
+
+text = config_path.read_text()
+
+desired_model_block = (
+    "model:\n"
+    "  default: deepseek/deepseek-v4-flash-0731\n"
+    "  provider: nous\n"
+)
+
+# Match the top-level `model:` block (all indented lines beneath it)
+pattern = r'(?m)^model:\n(?:(?:[ \t]+.*|)\n)*'
+match = re.search(pattern, text)
+
+if match:
+    current_block = match.group(0)
+    if current_block.strip() == desired_model_block.strip():
+        print("   ✓ primary model already correct (deepseek/deepseek-v4-flash-0731, provider=nous)")
+        raise SystemExit(0)
+    new_text = text[:match.start()] + desired_model_block + text[match.end():]
+else:
+    # No model: block at all — prepend it
+    new_text = desired_model_block + "\n" + text
+
+config_path.write_text(new_text)
+print("   ✓ primary model restored: deepseek/deepseek-v4-flash-0731 (provider=nous)")
+print("   ✓ fallback_providers cascade preserved unchanged")
+PYEOF
+
 # ── Startup diagnostic (no secrets) ─────────────────────────────────────
 echo ""
 echo "┌─────────────────────────────────────────────────────"
@@ -424,6 +478,10 @@ echo "│  Gateway  : polling mode (one replica)"
 
 # Rate-limit resilience
 echo "│  RL fix   : drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES}"
+
+# Primary model restore
+echo "│  Primary  : deepseek/deepseek-v4-flash-0731 (restored at startup)"
+echo "│  Fallback : stepfun→poolside→meituan→upstage (free Nous cascade)"
 
 # CDP status
 if [ "${CDP_READY:-0}" -eq 1 ]; then
