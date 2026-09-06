@@ -83,10 +83,6 @@ if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
 fi
 
 # ── Telegram proxy (fix: Railway network may block api.telegram.org) ────
-# If api.telegram.org is unreachable, Hermes loops on DNS-over-HTTPS
-# fallback with "Any cannot be instantiated" errors.
-# Set TELEGRAM_PROXY in Railway Variables (e.g. socks5://host:port or
-# http://host:port) to route Telegram traffic through a proxy.
 if [ -n "$TELEGRAM_PROXY" ]; then
     echo "TELEGRAM_PROXY=$TELEGRAM_PROXY" >> "$ENV_FILE"
     echo "   TELEGRAM_PROXY: configured (routing via proxy)"
@@ -133,18 +129,11 @@ echo "→ Verifying Hermes..."
 hermes --version 2>&1 || { echo "ERROR: Hermes not found"; exit 1; }
 
 # ── HF cache durability ────────────────────────────────────────────────
-# /root/.cache is EPHEMERAL (overlay) — wiped on every redeploy, so the
-# faster-whisper STT model (1.5 GB) re-downloads after every deploy.
-# Point HF caches at the durable volume so the model survives redeploys.
 export HF_HOME="${HF_HOME:-$HERMES_HOME/hf-cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HERMES_HOME/hf-cache/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HERMES_HOME/hf-cache/hub}"
 
 # ── browser-use CLI: repair symlink into /root/.hermes/bin ───────────────
-# The Dockerfile installs browser-use as a uv tool at build time, but
-# /root/.hermes/bin lives on a durable Railway volume that is mounted
-# AFTER the image layers are built. Re-run the install at container start
-# so the CLI entry-point is always present on the volume-backed path.
 export UV_TOOL_BIN_DIR="$HERMES_HOME/bin"
 if ! command -v browser-use &>/dev/null && ! [ -x "$HERMES_HOME/bin/browser-use" ]; then
     echo "→ Repairing browser-use CLI symlink in $HERMES_HOME/bin..."
@@ -153,8 +142,6 @@ if ! command -v browser-use &>/dev/null && ! [ -x "$HERMES_HOME/bin/browser-use"
 fi
 
 # ── Launch headless Chromium CDP on 127.0.0.1:9222 ──────────────────────
-# Hermes web_browsing tools require a running CDP endpoint.
-# We background Chromium before starting the gateway and wait for it.
 CDP_PORT=${HERMES_BROWSER_CDP_PORT:-9222}
 CDP_DATA_DIR=/tmp/bu-cdp
 
@@ -174,7 +161,6 @@ chromium \
     &>/tmp/chromium-cdp.log &
 CHROMIUM_PID=$!
 
-# Wait up to 20 s for CDP /json/version to respond
 CDP_READY=0
 for i in $(seq 1 20); do
     if curl -sf "http://127.0.0.1:${CDP_PORT}/json/version" -o /dev/null 2>/dev/null; then
@@ -189,21 +175,9 @@ if [ "$CDP_READY" -eq 0 ]; then
     echo "   ⚠ Chromium CDP did not come up within 20s — browser tools may be unavailable"
     echo "     Last log lines:"
     tail -5 /tmp/chromium-cdp.log 2>/dev/null || true
-    # Non-fatal: gateway still starts; browsing tools will report unavailable
 fi
 
 # ── Write browser.cdp_url into ~/.hermes/config.yaml ────────────────────
-# Canonical upstream config key (NousResearch/hermes-agent docs, browser
-# automation section). This is what browser_exec, browser_cdp and the
-# built-in browser tools read to attach to an existing CDP endpoint
-# instead of auto-launching a second Chrome.
-#
-# Rules:
-#   - Only runs when Chromium CDP confirmed ready above.
-#   - Uses /opt/hermes/venv/bin/python (no python3 in Railway PATH).
-#   - Idempotent: adds or updates only the browser.cdp_url key.
-#   - Never overwrites unrelated keys or comments.
-#   - Never exposes CDP on 0.0.0.0; URL is always 127.0.0.1:$CDP_PORT.
 if [ "${CDP_READY}" -eq 1 ]; then
     echo "→ Writing browser.cdp_url to $HERMES_HOME/config.yaml..."
     /opt/hermes/venv/bin/python - <<PYEOF
@@ -213,7 +187,6 @@ config_path = os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.
 cdp_url = f"http://127.0.0.1:{os.environ.get('CDP_PORT', '9222')}"
 cdp_line = f"  cdp_url: {cdp_url}\n"
 
-# Read existing config or start with empty string
 try:
     with open(config_path, 'r') as f:
         content = f.read()
@@ -221,13 +194,10 @@ except FileNotFoundError:
     content = ''
 
 lines = content.splitlines(keepends=True)
-
-# Strategy: find existing 'browser:' section and update/insert cdp_url
-# If no browser: section exists, append one.
 in_browser = False
 browser_section_start = None
 cdp_url_line_idx = None
-browser_end_idx = None  # first non-browser-indented line after section start
+browser_end_idx = None
 
 for idx, line in enumerate(lines):
     stripped = line.rstrip('\n')
@@ -236,7 +206,6 @@ for idx, line in enumerate(lines):
         browser_section_start = idx
         continue
     if in_browser:
-        # A line that starts at column 0 (and is not blank/comment) ends the section
         if stripped and not stripped.startswith(' ') and not stripped.startswith('#'):
             browser_end_idx = idx
             in_browser = False
@@ -245,16 +214,13 @@ for idx, line in enumerate(lines):
             cdp_url_line_idx = idx
 
 if browser_section_start is None:
-    # No browser: section — append it
     if content and not content.endswith('\n'):
         content += '\n'
     content += 'browser:\n' + cdp_line
 elif cdp_url_line_idx is not None:
-    # Update existing cdp_url line
     lines[cdp_url_line_idx] = cdp_line
     content = ''.join(lines)
 else:
-    # browser: section exists but no cdp_url — insert after browser: line
     lines.insert(browser_section_start + 1, cdp_line)
     content = ''.join(lines)
 
@@ -270,65 +236,33 @@ else
 fi
 
 # ── Railway-safe feature gating ─────────────────────────────────────────
-# Disable heavy/optional features that cause instability on Railway.
-# These env vars are read by Hermes at runtime; if a var is not
-# recognized, it is silently ignored (no-op).
 echo "→ Applying Railway-safe defaults..."
-
-# Browser / computer-use: CDP is now running — enable browser tools.
-# Allow override via Railway Variables (set to true to re-disable).
 export HERMES_DISABLE_BROWSER="${HERMES_DISABLE_BROWSER:-false}"
 export HERMES_DISABLE_COMPUTER_USE="${HERMES_DISABLE_COMPUTER_USE:-false}"
 export HERMES_DISABLE_BROWSER_CDP="${HERMES_DISABLE_BROWSER_CDP:-false}"
-
-# HERMES_BROWSER_CDP_URL kept for any internal env-var reader in older builds.
 export HERMES_BROWSER_CDP_URL="${HERMES_BROWSER_CDP_URL:-http://127.0.0.1:${CDP_PORT}}"
-
-# Mixture-of-agents: disable to avoid 429 retry storms on free-tier models
 export HERMES_DISABLE_MOA="${HERMES_DISABLE_MOA:-true}"
 export HERMES_MOA_MAX_RETRIES="${HERMES_MOA_MAX_RETRIES:-1}"
-
-# Self-improvement / background review loops: disable to reduce memory churn
 export HERMES_DISABLE_SELF_IMPROVEMENT="${HERMES_DISABLE_SELF_IMPROVEMENT:-true}"
 export HERMES_SELF_IMPROVEMENT_INTERVAL="${HERMES_SELF_IMPROVEMENT_INTERVAL:-0}"
-
-# Security tools: disable tirith to avoid timeout noise
 export HERMES_DISABLE_TIRITH="${HERMES_DISABLE_TIRITH:-true}"
-
-# Memory: keep default limit but log if overridden
 if [ -n "${HERMES_MEMORY_MAX_CHARS}" ]; then
     echo "   HERMES_MEMORY_MAX_CHARS: ${HERMES_MEMORY_MAX_CHARS}"
 fi
+echo "   Railway-safe defaults applied (browser=ON cdp=ON, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
 
-# ── Tool-loop circuit breaker (unattended gateway) ──────────────────────
-# Official docs (2026): hard_stop_enabled defaults to false, which is
-# safe for interactive CLI sessions but dangerous for headless gateway
-# deployments — the agent can loop forever on repeated tool failures.
-# Enable the circuit breaker so Railway's restart policy can kick in.
-# Override with HERMES_TOOL_LOOP_HARD_STOP=false if you want warnings-only.
+# ── Tool-loop circuit breaker ─────────────────────────────────────────────
 export HERMES_TOOL_LOOP_HARD_STOP="${HERMES_TOOL_LOOP_HARD_STOP:-true}"
 export HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE="${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE:-5}"
 export HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT="${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT:-5}"
 
-echo "   Railway-safe defaults applied (browser=ON cdp=ON, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
-
 # ── Root gateway opt-in ─────────────────────────────────────────────────
-# Hermes v0.20.1+ refuses to run the gateway as root when it detects the
-# official-image layout (/opt/hermes). On Railway the container runs as
-# root by default and the volume ($HERMES_HOME) is root-owned anyway —
-# there is no non-root user to break, so the risk the guard warns about
-# does not apply. Opt in explicitly.
 export HERMES_ALLOW_ROOT_GATEWAY="${HERMES_ALLOW_ROOT_GATEWAY:-1}"
 
 # ── Telegram init timeout ────────────────────────────────────────────────
-# Allow up to 15 seconds for the Telegram adapter to establish its first
-# connection before Hermes declares the gateway unhealthy.
 export HERMES_TELEGRAM_INIT_TIMEOUT="${HERMES_TELEGRAM_INIT_TIMEOUT:-15}"
 
 # ── API server (healthcheck endpoint) ───────────────────────────────────
-# Exposes :8642/health for Railway health monitoring and external tools.
-# API_SERVER_KEY must be >= 8 chars (Hermes requirement). Generate from
-# urandom if not set in Railway Variables.
 export API_SERVER_ENABLED="${API_SERVER_ENABLED:-true}"
 export API_SERVER_HOST="${API_SERVER_HOST:-0.0.0.0}"
 if [ -z "${API_SERVER_KEY:-}" ]; then
@@ -338,59 +272,23 @@ if [ -z "${API_SERVER_KEY:-}" ]; then
 else
     echo "   API_SERVER_KEY: set via Railway Variables"
 fi
-# Write API server settings to .env so Hermes runtime picks them up
 echo "API_SERVER_ENABLED=${API_SERVER_ENABLED}" >> "$ENV_FILE"
 echo "API_SERVER_HOST=${API_SERVER_HOST}" >> "$ENV_FILE"
 echo "API_SERVER_KEY=${API_SERVER_KEY}" >> "$ENV_FILE"
 
 # ── Telegram polling conflict mitigation ────────────────────────────────
-# On Railway restarts, a stale getUpdates session may still be held open
-# on Telegram's servers. Delete any cached offset file so the new session
-# starts fresh and does not fight the old one.
 if [ -f "$HERMES_HOME/telegram_offset" ]; then
     echo "→ Clearing stale Telegram offset file..."
     rm -f "$HERMES_HOME/telegram_offset"
 fi
 
 # ── Rate-limit resilience & drain timeout ───────────────────────────────
-# FIX(2026-09-06): /restart hangs indefinitely when Nous rate-limits
-# BOTH the primary model (deepseek/deepseek-v4-flash) AND the fallback
-# (stepfun/step-3.7-flash:free) simultaneously (HTTP 429).
-#
-# Observed logs:
-#   09:03 RateLimitError provider=nous model=deepseek/deepseek-v4-flash
-#   09:31 RateLimitError provider=nous model=stepfun/step-3.7-flash:free
-#   => conversation_loop stuck in 3-retry loop => agent never exits =>
-#      drain blocks => /restart hangs forever
-#
-# HERMES_DRAIN_TIMEOUT_SECONDS: hard-kill agents still alive after N sec
-#   during drain. Prevents infinite /restart hangs.
-# HERMES_RATE_LIMIT_BACKOFF_BASE: exponential backoff base in seconds.
-#   Retry 1: ~2s, Retry 2: ~4s — prevents instant retry storms on 429.
-# HERMES_RATE_LIMIT_MAX_RETRIES: max retries on 429 before giving up.
-#   Lowered to 2 so stuck agents resolve faster and drain can complete.
 export HERMES_DRAIN_TIMEOUT_SECONDS="${HERMES_DRAIN_TIMEOUT_SECONDS:-30}"
 export HERMES_RATE_LIMIT_BACKOFF_BASE="${HERMES_RATE_LIMIT_BACKOFF_BASE:-2}"
 export HERMES_RATE_LIMIT_MAX_RETRIES="${HERMES_RATE_LIMIT_MAX_RETRIES:-2}"
 echo "   Rate-limit resilience: backoff_base=${HERMES_RATE_LIMIT_BACKOFF_BASE}s, max_retries=${HERMES_RATE_LIMIT_MAX_RETRIES}, drain_timeout=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
 
 # ── Primary model restore (sticky-fallback prevention) ──────────────────
-# PROBLEM: When Hermes exhausts its fallback chain during a rate-limited
-# turn, it may write the last-used fallback model back to config.yaml as
-# the new primary. On the next container start the gateway launches with
-# upstage/solar-pro4:free (or another free model) instead of the intended
-# paid primary. After credits are refilled, DeepSeek is never used.
-#
-# FIX: At every startup, idempotently restore the top-level `model:` block
-# to the paid primary BEFORE starting the gateway.
-#
-# WHAT THIS DOES NOT CHANGE:
-#   - fallback_providers: cascade is preserved exactly as-is in config.yaml
-#   - All other config.yaml keys are untouched
-#   - At runtime, if the primary 429s, Hermes still cascades through:
-#       stepfun/step-3.7-flash:free → poolside/laguna-s-2.1:free
-#       → meituan/longcat-2.0:free → upstage/solar-pro4:free
-#   - On the NEXT container start (after credits refill), primary = DeepSeek again
 echo "→ Restoring primary model (sticky-fallback prevention)..."
 /opt/hermes/venv/bin/python - <<'PYEOF'
 from pathlib import Path
@@ -409,7 +307,6 @@ desired_model_block = (
     "  provider: nous\n"
 )
 
-# Match the top-level `model:` block (all indented lines beneath it)
 pattern = r'(?m)^model:\n(?:(?:[ \t]+.*|)\n)*'
 match = re.search(pattern, text)
 
@@ -420,7 +317,6 @@ if match:
         raise SystemExit(0)
     new_text = text[:match.start()] + desired_model_block + text[match.end():]
 else:
-    # No model: block at all — prepend it
     new_text = desired_model_block + "\n" + text
 
 config_path.write_text(new_text)
@@ -428,13 +324,39 @@ print("   ✓ primary model restored: deepseek/deepseek-v4-flash-0731 (provider=
 print("   ✓ fallback_providers cascade preserved unchanged")
 PYEOF
 
+# ── Fix: rename 'a2a' toolset → 'hermes-telegram' (v0.21.0 breaking change) ──
+# In v0.21.0 the built-in Telegram toolset was renamed from 'a2a' to
+# 'hermes-telegram'. Config written by older versions still references 'a2a'
+# in platform_toolsets and known_plugin_toolsets, causing the warning:
+#   "platform 'telegram' references unknown toolset 'a2a'"
+# This block idempotently renames the value in config.yaml at every startup.
+echo "→ Fixing toolset name: a2a → hermes-telegram (v0.21.0)..."
+/opt/hermes/venv/bin/python - <<'PYEOF'
+from pathlib import Path
+import re, os
+
+config_path = Path(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes'))) / 'config.yaml'
+if not config_path.exists():
+    raise SystemExit(0)
+
+text = config_path.read_text()
+
+# Replace `- a2a` list items that appear under telegram: sections
+# Pattern: lines containing exactly `    - a2a` (4-space indent under telegram:)
+new_text = re.sub(r'^([ \t]+-[ \t]+)a2a([ \t]*)$', r'\1hermes-telegram\2', text, flags=re.MULTILINE)
+
+if new_text != text:
+    config_path.write_text(new_text)
+    print("   ✓ toolset renamed: a2a → hermes-telegram in config.yaml")
+else:
+    print("   ✓ toolset name already correct (hermes-telegram)")
+PYEOF
+
 # ── Startup diagnostic (no secrets) ─────────────────────────────────────
 echo ""
 echo "┌─────────────────────────────────────────────────────"
 echo "│  HERMES STARTUP DIAGNOSTIC"
 echo "├─────────────────────────────────────────────────────"
-
-# Provider
 if [ -n "$NOUS_PORTAL_TOKEN" ]; then
     echo "│  Provider : Nous Portal (NOUS_PORTAL_TOKEN set)"
 elif [ -n "$NOUS_API_KEY" ]; then
@@ -442,61 +364,36 @@ elif [ -n "$NOUS_API_KEY" ]; then
 else
     echo "│  Provider : ⚠ NONE — no Nous key found"
 fi
-
-# Non-Nous providers — warn loudly if they are present in env
 for EXCLUDED in OPENROUTER_API_KEY OPENAI_API_KEY STEPFUN_API_KEY COMETAPI_API_KEY COMETAPI_KEY; do
     if [ -n "${!EXCLUDED}" ]; then
         echo "│  ⚠ EXCLUDED KEY IN RAILWAY ENV: $EXCLUDED (NOT passed to Hermes)"
     fi
 done
-
-# SQLite version
 SQLITE_VER=$(/opt/hermes/venv/bin/python -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
 echo "│  SQLite   : $SQLITE_VER"
-
-# state.db
 if [ -f "$DB" ]; then
     DB_SIZE=$(du -sh "$DB" 2>/dev/null | cut -f1 || echo "?")
     echo "│  state.db : present ($DB_SIZE)"
 else
     echo "│  state.db : not present (fresh start)"
 fi
-
-# Disk space
 DISK_FREE=$(df -h "$HERMES_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "?")
 echo "│  Disk free: $DISK_FREE on $HERMES_HOME"
-
-# API server
 echo "│  API srv  : :8642/health (API_SERVER_ENABLED=${API_SERVER_ENABLED})"
-
-# Tool-loop circuit breaker
 echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP} (exact=${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE}, idempotent=${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT})"
-
-# Telegram init timeout
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
-
-# Rate-limit resilience
 echo "│  RL fix   : drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES}"
-
-# Primary model restore
 echo "│  Primary  : deepseek/deepseek-v4-flash-0731 (restored at startup)"
 echo "│  Fallback : stepfun→poolside→meituan→upstage (free Nous cascade)"
-
-# CDP status
+echo "│  Toolset  : hermes-telegram (a2a renamed)"
 if [ "${CDP_READY:-0}" -eq 1 ]; then
     echo "│  Browser  : Chromium CDP ✓ http://127.0.0.1:${CDP_PORT} (pid ${CHROMIUM_PID})"
     echo "│  CDP cfg  : browser.cdp_url written to config.yaml"
 else
     echo "│  Browser  : Chromium CDP ✗ not ready (tools will be unavailable)"
 fi
-
-# TODO(arch): Official nousresearch/hermes-agent:latest now uses s6-overlay
-# as PID 1 (not tini). When migrating to the official base image, remove
-# the tini ENTRYPOINT from Dockerfile and update entrypoint.sh accordingly.
-# Ref: https://hermes-agent.nousresearch.com/docs/user-guide/docker/
 echo "│  Init sys : tini (tech debt: migrate to s6 on official image)"
-
 echo "└─────────────────────────────────────────────────────"
 echo ""
 
