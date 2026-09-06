@@ -352,6 +352,28 @@ if [ -f "$HERMES_HOME/telegram_offset" ]; then
     rm -f "$HERMES_HOME/telegram_offset"
 fi
 
+# ── Rate-limit resilience & drain timeout ───────────────────────────────
+# FIX(2026-09-06): /restart hangs indefinitely when Nous rate-limits
+# BOTH the primary model (deepseek/deepseek-v4-flash) AND the fallback
+# (stepfun/step-3.7-flash:free) simultaneously (HTTP 429).
+#
+# Observed logs:
+#   09:03 RateLimitError provider=nous model=deepseek/deepseek-v4-flash
+#   09:31 RateLimitError provider=nous model=stepfun/step-3.7-flash:free
+#   => conversation_loop stuck in 3-retry loop => agent never exits =>
+#      drain blocks => /restart hangs forever
+#
+# HERMES_DRAIN_TIMEOUT_SECONDS: hard-kill agents still alive after N sec
+#   during drain. Prevents infinite /restart hangs.
+# HERMES_RATE_LIMIT_BACKOFF_BASE: exponential backoff base in seconds.
+#   Retry 1: ~2s, Retry 2: ~4s — prevents instant retry storms on 429.
+# HERMES_RATE_LIMIT_MAX_RETRIES: max retries on 429 before giving up.
+#   Lowered to 2 so stuck agents resolve faster and drain can complete.
+export HERMES_DRAIN_TIMEOUT_SECONDS="${HERMES_DRAIN_TIMEOUT_SECONDS:-30}"
+export HERMES_RATE_LIMIT_BACKOFF_BASE="${HERMES_RATE_LIMIT_BACKOFF_BASE:-2}"
+export HERMES_RATE_LIMIT_MAX_RETRIES="${HERMES_RATE_LIMIT_MAX_RETRIES:-2}"
+echo "   Rate-limit resilience: backoff_base=${HERMES_RATE_LIMIT_BACKOFF_BASE}s, max_retries=${HERMES_RATE_LIMIT_MAX_RETRIES}, drain_timeout=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
+
 # ── Startup diagnostic (no secrets) ─────────────────────────────────────
 echo ""
 echo "┌─────────────────────────────────────────────────────"
@@ -399,6 +421,9 @@ echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP} (
 # Telegram init timeout
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
+
+# Rate-limit resilience
+echo "│  RL fix   : drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES}"
 
 # CDP status
 if [ "${CDP_READY:-0}" -eq 1 ]; then
