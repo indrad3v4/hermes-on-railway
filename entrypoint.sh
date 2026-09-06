@@ -23,10 +23,6 @@ echo "→ Writing secrets to .env..."
 : > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-# Nous Portal / Nous API — primary and only provider for this deployment.
-# NOUS_PORTAL_TOKEN: issued at portal.nousresearch.com (OAuth)
-# NOUS_API_KEY: issued at nousresearch.com/api (direct API)
-# At least one must be set for Hermes to reach Nous models.
 PROVIDER_KEYS=""
 for VAR in NOUS_PORTAL_TOKEN NOUS_API_KEY \
            HF_TOKEN FIRECRAWL_API_KEY GITHUB_TOKEN; do
@@ -36,23 +32,16 @@ for VAR in NOUS_PORTAL_TOKEN NOUS_API_KEY \
     fi
 done
 
-# Safety: keys that would enable non-Nous providers are intentionally
-# excluded from the .env export cycle. If they exist in Railway Variables
-# they remain available to Railway infrastructure but are NOT passed to
-# Hermes runtime. This prevents automatic fallback to CometAPI, OpenRouter,
-# OpenAI, or StepFun.
-# Excluded: OPENROUTER_API_KEY ANTHROPIC_API_KEY STEPFUN_API_KEY
-#           OPENAI_API_KEY COMETAPI_API_KEY COMETAPI_KEY
+# Excluded from .env: OPENROUTER_API_KEY ANTHROPIC_API_KEY STEPFUN_API_KEY
+#                     OPENAI_API_KEY COMETAPI_API_KEY COMETAPI_KEY
 
 if [ -n "$PROVIDER_KEYS" ]; then
     echo "   Detected provider keys:${PROVIDER_KEYS}"
 else
     echo "   WARNING: No Nous provider key detected (NOUS_PORTAL_TOKEN or NOUS_API_KEY)."
-    echo "            Hermes cannot reach Nous Portal models without at least one of these."
     echo "            Set NOUS_PORTAL_TOKEN or NOUS_API_KEY in Railway Variables."
 fi
 
-# Telegram credentials
 echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" >> "$ENV_FILE"
 if [ -n "$TELEGRAM_ALLOWED_USERS" ]; then
     echo "TELEGRAM_ALLOWED_USERS=$TELEGRAM_ALLOWED_USERS" >> "$ENV_FILE"
@@ -62,9 +51,6 @@ else
 fi
 
 # ── Git/GitHub agent tooling self-healing ────────────────────────────────
-# /root (overlay) is wiped on redeploy — gh stays (Dockerfile), but git
-# config + credentials die with it. Recreate from GH_TOKEN/GITHUB_TOKEN so
-# agent git workflows keep working in every fresh container.
 if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
     GHTOK="${GITHUB_TOKEN:-$GH_TOKEN}"
     GH_LOGIN=$(curl -s -H "Authorization: Bearer $GHTOK" \
@@ -76,25 +62,21 @@ if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
         git config --global credential.helper store
         printf 'https://x-access-token:%s@github.com\n' "$GHTOK" > "$HOME/.git-credentials"
         chmod 600 "$HOME/.git-credentials"
-        echo "   git credentials configured for $GH_LOGIN (token: ${GITHUB_TOKEN:+GITHUB_TOKEN}${GH_TOKEN:+GH_TOKEN})"
+        echo "   git credentials configured for $GH_LOGIN"
     else
         echo "   ⚠ GH_TOKEN/GITHUB_TOKEN present but invalid — git credentials NOT configured"
     fi
 fi
 
-# ── Telegram proxy (fix: Railway network may block api.telegram.org) ────
+# ── Telegram proxy ──────────────────────────────────────────────────────────
 if [ -n "$TELEGRAM_PROXY" ]; then
     echo "TELEGRAM_PROXY=$TELEGRAM_PROXY" >> "$ENV_FILE"
-    echo "   TELEGRAM_PROXY: configured (routing via proxy)"
+    echo "   TELEGRAM_PROXY: configured"
 else
-    echo "   TELEGRAM_PROXY: not set — if Telegram is unreachable, set this variable"
+    echo "   TELEGRAM_PROXY: not set"
 fi
 
 # ── state.db pre-flight: non-destructive integrity check ────────────────
-# Policy (2026-08-29): never auto-delete or auto-overwrite state.db.
-# On corruption: backup only, then HALT with a clear message.
-# Recovery to a new DB requires manual operator confirmation.
-# See OPERATIONS.md §5 for the recovery procedure.
 DB="$HERMES_HOME/state.db"
 if [ -f "$DB" ]; then
     echo "→ state.db pre-flight check..."
@@ -116,9 +98,7 @@ PYEOF
         echo "   ✗ state.db integrity check FAILED."
         echo "   → Backing up to: $BACKUP"
         cp "$DB" "$BACKUP" 2>/dev/null || true
-        echo "   ✗ HALTING. state.db is corrupt and requires manual recovery."
-        echo "     Do NOT delete state.db automatically — data may be recoverable."
-        echo "     Run the recovery procedure in OPERATIONS.md §5, then redeploy."
+        echo "   ✗ HALTING. Run recovery in OPERATIONS.md §5, then redeploy."
         echo "     Backup saved at: $BACKUP"
         exit 1
     fi
@@ -133,12 +113,12 @@ export HF_HOME="${HF_HOME:-$HERMES_HOME/hf-cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HERMES_HOME/hf-cache/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HERMES_HOME/hf-cache/hub}"
 
-# ── browser-use CLI: repair symlink into /root/.hermes/bin ───────────────
+# ── browser-use CLI: repair symlink ─────────────────────────────────────────
 export UV_TOOL_BIN_DIR="$HERMES_HOME/bin"
 if ! command -v browser-use &>/dev/null && ! [ -x "$HERMES_HOME/bin/browser-use" ]; then
     echo "→ Repairing browser-use CLI symlink in $HERMES_HOME/bin..."
     uv tool install --force browser-use --quiet 2>&1 || \
-        echo "   ⚠ browser-use reinstall failed (non-fatal — Chromium still available)"
+        echo "   ⚠ browser-use reinstall failed (non-fatal)"
 fi
 
 # ── Launch headless Chromium CDP on 127.0.0.1:9222 ──────────────────────
@@ -172,14 +152,13 @@ for i in $(seq 1 20); do
 done
 
 if [ "$CDP_READY" -eq 0 ]; then
-    echo "   ⚠ Chromium CDP did not come up within 20s — browser tools may be unavailable"
-    echo "     Last log lines:"
+    echo "   ⚠ Chromium CDP did not come up within 20s"
     tail -5 /tmp/chromium-cdp.log 2>/dev/null || true
 fi
 
-# ── Write browser.cdp_url into ~/.hermes/config.yaml ────────────────────
+# ── Write browser.cdp_url into config.yaml ──────────────────────────────
 if [ "${CDP_READY}" -eq 1 ]; then
-    echo "→ Writing browser.cdp_url to $HERMES_HOME/config.yaml..."
+    echo "→ Writing browser.cdp_url to config.yaml..."
     /opt/hermes/venv/bin/python - <<PYEOF
 import sys, os, re
 
@@ -227,8 +206,7 @@ else:
 os.makedirs(os.path.dirname(config_path), exist_ok=True)
 with open(config_path, 'w') as f:
     f.write(content)
-
-print(f'   browser.cdp_url = {cdp_url} written to {config_path}')
+print(f'   browser.cdp_url = {cdp_url}')
 PYEOF
     echo "   ✓ browser.cdp_url configured"
 else
@@ -249,7 +227,24 @@ export HERMES_DISABLE_TIRITH="${HERMES_DISABLE_TIRITH:-true}"
 if [ -n "${HERMES_MEMORY_MAX_CHARS}" ]; then
     echo "   HERMES_MEMORY_MAX_CHARS: ${HERMES_MEMORY_MAX_CHARS}"
 fi
-echo "   Railway-safe defaults applied (browser=ON cdp=ON, moa=off, self-improvement=off, tirith=off, hard_stop=on)"
+
+# ── Auxiliary title generation ─────────────────────────────────────────────
+# PROBLEM (2026-09-06): title_generation fires a separate LLM call before
+# every response using the auxiliary model slot. On Nous Portal this call
+# returns a truncated ChatCompletion (choices=None) that Hermes can't parse,
+# logging:
+#   "Auxiliary title_generation: LLM returned invalid response"
+# The call still blocks for 30-40s (full timeout) before the main response
+# is returned, causing "hi" → 42s latency on every message.
+#
+# FIX: disable the auxiliary title generation entirely.
+# Conversation titles will fall back to the first-message preview.
+# Re-enable by setting HERMES_DISABLE_TITLE_GENERATION=false in Railway vars.
+export HERMES_DISABLE_TITLE_GENERATION="${HERMES_DISABLE_TITLE_GENERATION:-true}"
+export HERMES_TITLE_GENERATION_TIMEOUT="${HERMES_TITLE_GENERATION_TIMEOUT:-0}"
+
+echo "   title_gen=OFF (auxiliary model fix: choices=None bug)"
+echo "   Railway-safe defaults applied"
 
 # ── Tool-loop circuit breaker ─────────────────────────────────────────────
 export HERMES_TOOL_LOOP_HARD_STOP="${HERMES_TOOL_LOOP_HARD_STOP:-true}"
@@ -268,7 +263,7 @@ export API_SERVER_HOST="${API_SERVER_HOST:-0.0.0.0}"
 if [ -z "${API_SERVER_KEY:-}" ]; then
     export API_SERVER_KEY=$(python3 -c \
         "import os; print(os.urandom(24).hex())" 2>/dev/null || echo "hermes-railway-default-key-2026")
-    echo "   API_SERVER_KEY: auto-generated (not set in Railway Variables)"
+    echo "   API_SERVER_KEY: auto-generated"
 else
     echo "   API_SERVER_KEY: set via Railway Variables"
 fi
@@ -286,17 +281,17 @@ fi
 export HERMES_DRAIN_TIMEOUT_SECONDS="${HERMES_DRAIN_TIMEOUT_SECONDS:-30}"
 export HERMES_RATE_LIMIT_BACKOFF_BASE="${HERMES_RATE_LIMIT_BACKOFF_BASE:-2}"
 export HERMES_RATE_LIMIT_MAX_RETRIES="${HERMES_RATE_LIMIT_MAX_RETRIES:-2}"
-echo "   Rate-limit resilience: backoff_base=${HERMES_RATE_LIMIT_BACKOFF_BASE}s, max_retries=${HERMES_RATE_LIMIT_MAX_RETRIES}, drain_timeout=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
+echo "   RL: backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES} drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s"
 
 # ── Primary model restore (sticky-fallback prevention) ──────────────────
-echo "→ Restoring primary model (sticky-fallback prevention)..."
+echo "→ Restoring primary model..."
 /opt/hermes/venv/bin/python - <<'PYEOF'
 from pathlib import Path
 import re, os
 
 config_path = Path(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes'))) / 'config.yaml'
 if not config_path.exists():
-    print("   config.yaml not found — skipping primary restore (fresh install)")
+    print("   config.yaml not found — skipping (fresh install)")
     raise SystemExit(0)
 
 text = config_path.read_text()
@@ -313,7 +308,7 @@ match = re.search(pattern, text)
 if match:
     current_block = match.group(0)
     if current_block.strip() == desired_model_block.strip():
-        print("   ✓ primary model already correct (deepseek/deepseek-v4-flash-0731, provider=nous)")
+        print("   ✓ primary model already correct")
         raise SystemExit(0)
     new_text = text[:match.start()] + desired_model_block + text[match.end():]
 else:
@@ -321,16 +316,10 @@ else:
 
 config_path.write_text(new_text)
 print("   ✓ primary model restored: deepseek/deepseek-v4-flash-0731 (provider=nous)")
-print("   ✓ fallback_providers cascade preserved unchanged")
 PYEOF
 
-# ── Fix: rename 'a2a' toolset → 'hermes-telegram' (v0.21.0 breaking change) ──
-# In v0.21.0 the built-in Telegram toolset was renamed from 'a2a' to
-# 'hermes-telegram'. Config written by older versions still references 'a2a'
-# in platform_toolsets and known_plugin_toolsets, causing the warning:
-#   "platform 'telegram' references unknown toolset 'a2a'"
-# This block idempotently renames the value in config.yaml at every startup.
-echo "→ Fixing toolset name: a2a → hermes-telegram (v0.21.0)..."
+# ── Fix: rename 'a2a' → 'hermes-telegram' (v0.21.0) ─────────────────────────
+echo "→ Fixing toolset name: a2a → hermes-telegram..."
 /opt/hermes/venv/bin/python - <<'PYEOF'
 from pathlib import Path
 import re, os
@@ -340,16 +329,13 @@ if not config_path.exists():
     raise SystemExit(0)
 
 text = config_path.read_text()
-
-# Replace `- a2a` list items that appear under telegram: sections
-# Pattern: lines containing exactly `    - a2a` (4-space indent under telegram:)
 new_text = re.sub(r'^([ \t]+-[ \t]+)a2a([ \t]*)$', r'\1hermes-telegram\2', text, flags=re.MULTILINE)
 
 if new_text != text:
     config_path.write_text(new_text)
-    print("   ✓ toolset renamed: a2a → hermes-telegram in config.yaml")
+    print("   ✓ a2a → hermes-telegram")
 else:
-    print("   ✓ toolset name already correct (hermes-telegram)")
+    print("   ✓ toolset already hermes-telegram")
 PYEOF
 
 # ── Startup diagnostic (no secrets) ─────────────────────────────────────
@@ -366,7 +352,7 @@ else
 fi
 for EXCLUDED in OPENROUTER_API_KEY OPENAI_API_KEY STEPFUN_API_KEY COMETAPI_API_KEY COMETAPI_KEY; do
     if [ -n "${!EXCLUDED}" ]; then
-        echo "│  ⚠ EXCLUDED KEY IN RAILWAY ENV: $EXCLUDED (NOT passed to Hermes)"
+        echo "│  ⚠ EXCLUDED KEY: $EXCLUDED (NOT passed to Hermes)"
     fi
 done
 SQLITE_VER=$(/opt/hermes/venv/bin/python -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
@@ -380,20 +366,19 @@ fi
 DISK_FREE=$(df -h "$HERMES_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "?")
 echo "│  Disk free: $DISK_FREE on $HERMES_HOME"
 echo "│  API srv  : :8642/health (API_SERVER_ENABLED=${API_SERVER_ENABLED})"
-echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP} (exact=${HERMES_TOOL_LOOP_HARD_STOP_EXACT_FAILURE}, idempotent=${HERMES_TOOL_LOOP_HARD_STOP_IDEMPOTENT})"
+echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP}"
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
 echo "│  RL fix   : drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES}"
 echo "│  Primary  : deepseek/deepseek-v4-flash-0731 (restored at startup)"
-echo "│  Fallback : stepfun→poolside→meituan→upstage (free Nous cascade)"
+echo "│  Fallback : stepfun→poolside→meituan→upstage"
 echo "│  Toolset  : hermes-telegram (a2a renamed)"
+echo "│  Title gen: DISABLED (auxiliary choices=None fix)"
 if [ "${CDP_READY:-0}" -eq 1 ]; then
     echo "│  Browser  : Chromium CDP ✓ http://127.0.0.1:${CDP_PORT} (pid ${CHROMIUM_PID})"
-    echo "│  CDP cfg  : browser.cdp_url written to config.yaml"
 else
-    echo "│  Browser  : Chromium CDP ✗ not ready (tools will be unavailable)"
+    echo "│  Browser  : Chromium CDP ✗ not ready"
 fi
-echo "│  Init sys : tini (tech debt: migrate to s6 on official image)"
 echo "└─────────────────────────────────────────────────────"
 echo ""
 
