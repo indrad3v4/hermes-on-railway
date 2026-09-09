@@ -1,0 +1,46 @@
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index 77db1c3..0000000 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
+ # stalls system-prompt assembly before the first turn.
+ _CONTEXT_FILE_READ_TIMEOUT_SECS = 5.0
++_CONTEXT_FILE_READ_MAX_CONCURRENT = max(
++    1, int(os.environ.get("HERMES_CONTEXT_READ_MAX_CONCURRENT", "4"))
++)
++_CONTEXT_FILE_READ_SLOTS = threading.BoundedSemaphore(_CONTEXT_FILE_READ_MAX_CONCURRENT)
+ 
+ 
+ def _get_context_file_read_timeout() -> float:
+@@ -46,6 +50,15 @@ def _read_text_with_timeout(path: Path, timeout: Optional[float] = None) -> Optional[str]:
+     if timeout is None:
+         timeout = _get_context_file_read_timeout()
++    # Python cannot safely cancel a blocked filesystem call. Bound admission so a
++    # permanently stuck read can consume at most one of a fixed number of daemon
++    # reader slots instead of creating an unbounded thread per attempt.
++    if not _CONTEXT_FILE_READ_SLOTS.acquire(blocking=False):
++        logger.warning(
++            "Context file %s read skipped: all %d reader slots are occupied",
++            path, _CONTEXT_FILE_READ_MAX_CONCURRENT,
++        )
++        return None
++
+     result: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+ 
+     def _reader() -> None:
+@@ -53,7 +66,13 @@ def _read_text_with_timeout(path: Path, timeout: Optional[float] = None) -> Optional[str]:
+         try:
+             result.put((True, path.read_text(encoding="utf-8")))
+         except Exception as exc:  # re-raised on the caller thread
+             result.put((False, exc))
++        finally:
++            _CONTEXT_FILE_READ_SLOTS.release()
+ 
+-    threading.Thread(target=_reader, daemon=True, name=f"context-read:{path.name}").start()
++    try:
++        threading.Thread(target=_reader, daemon=True, name=f"context-read:{path.name}").start()
++    except Exception:
++        _CONTEXT_FILE_READ_SLOTS.release()
++        raise
+     try:
+         ok, value = result.get(timeout=timeout)
