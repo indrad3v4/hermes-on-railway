@@ -9,18 +9,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ── uv + uv-managed Python ──────────────────────────────────────────────
-# Debian trixie's system Python 3.13.5 links libsqlite3 3.46.1, which is
-# vulnerable to the WAL-reset corruption bug (sqlite.org/wal.html#walresetbug)
-# — the likely root cause of the 2026-08-15 state.db corruption incident.
-# uv-managed CPython (python-build-standalone) ships a patched SQLite
-# (>= 3.51.3) statically linked. This mirrors what the official Hermes
-# installer does (old image: Python 3.11.16 + SQLite 3.53.1).
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
-# ── Hermes Agent: deterministic clone-and-install ───────────────────────
-# HERMES_REF can be pinned to a tag/commit for full reproducibility.
-ARG HERMES_REF=main
+# ── Hermes Agent ────────────────────────────────────────────────────────
+# Pin the upstream revision in Railway variables/build args. Default is the
+# known-good revision from 2026-09-09 used while debugging thread pressure.
+ARG HERMES_REF=9e0dc4319ae2d59c60f5226b5c0af58d17755bfa
 RUN git clone --depth 1 --branch "$HERMES_REF" \
     https://github.com/NousResearch/hermes-agent.git /opt/hermes
 
@@ -29,42 +24,21 @@ RUN uv python install 3.12 && \
     uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         -e '/opt/hermes[messaging]'
 
-# ── Bake local ML/doc packages into venv ────────────────────────────────
-# faster-whisper: local STT (voice notes) — was lost on redeploy (a180c22).
-# librosa: voice_prosody.py affect analysis (energy/F0/register).
-# pymupdf + python-docx: triz RAG ingest (PDF/DOCX) (58d9f23).
-# browser-use: headless browser automation (Hermes web_browsing stack).
-# NOTE: cometapi SDK intentionally removed — vision-insight now routes
-# exclusively through Nous Portal. CometAPI must not be an automatic
-# fallback or auxiliary provider in this deployment.
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         pymupdf python-docx faster-whisper librosa browser-use
 
-# ── browser-use CLI tool (for /root/.hermes/bin symlink) ─────────────────
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
 
-# ── Pin python-telegram-bot to 22.6 ─────────────────────────────────────
-# Upstream bug NousResearch/hermes-agent#85272: the messaging extra pins
-# python-telegram-bot 22.8, which routes the Telegram adapter through the
-# deferred SDK import path where TypeHandler is never rebound from
-# typing.Any → "Any cannot be instantiated" → gateway boots with no
-# connected platforms. This install runs AFTER the extra, so 22.6 wins.
-# TODO: unpin after upstream PR #85421 merges and HERMES_REF is bumped.
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         'python-telegram-bot[webhooks]==22.6' && \
     /opt/hermes/venv/bin/pip show python-telegram-bot | head -2
 
-# ── Build-time guard: never deploy a WAL-reset-vulnerable runtime ───────
-# Fails the build loudly if the venv's linked SQLite is older than the
-# 3.51.3 fix. A silent skip here means silent db corruption later.
 RUN /opt/hermes/venv/bin/python -c \
     "import sqlite3; v=tuple(map(int, sqlite3.sqlite_version.split('.'))); \
      assert v >= (3, 51, 3), f'Vulnerable SQLite {sqlite3.sqlite_version} — WAL-reset bug'; \
      print('SQLite', sqlite3.sqlite_version, 'OK (WAL-reset patched)')"
 
-# ── Build-time guard: cometapi must NOT be importable in venv ────────────
-# Ensures no code path can accidentally import and initialise CometAPI.
 RUN /opt/hermes/venv/bin/python -c \
     "import importlib.util; \
      assert importlib.util.find_spec('cometapi') is None, \
@@ -74,18 +48,13 @@ RUN /opt/hermes/venv/bin/python -c \
 RUN ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes && \
     /usr/local/bin/hermes --version
 
-# ── Apply local patches to upstream code ────────────────────────────────
-# 1. video-note.patch: Telegram adapter previously IGNORED round video
-#    messages (кружок) — restores video_note handling.
-# 2. stt-local-files-only.patch (2026-08-28): path-based STT models
-#    (stt.local.model: /opt/hermes-models/turbo) failed with "Repo id must
-#    be in the form ..." — pass local_files_only=True for directory paths so
-#    voice transcription uses the local turbo model instead of erroring out.
 COPY patches/ /opt/patches/
 RUN git -C /opt/hermes apply /opt/patches/video-note.patch && \
     echo "Applied: video-note.patch" && \
     git -C /opt/hermes apply /opt/patches/stt-local-files-only.patch && \
-    echo "Applied: stt-local-files-only.patch"
+    echo "Applied: stt-local-files-only.patch" && \
+    git -C /opt/hermes apply /opt/patches/context-read-bounded.patch && \
+    echo "Applied: context-read-bounded.patch"
 
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
