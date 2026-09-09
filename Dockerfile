@@ -13,11 +13,12 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
 # ── Hermes Agent ────────────────────────────────────────────────────────
-# Pin the upstream revision in Railway variables/build args. Default is the
-# known-good revision from 2026-09-09 used while debugging thread pressure.
+# Pin the upstream revision used as the debugging baseline. HERMES_REF may
+# be overridden with a branch, tag, or commit SHA by the build environment.
 ARG HERMES_REF=9e0dc4319ae2d59c60f5226b5c0af58d17755bfa
-RUN git clone --depth 1 --branch "$HERMES_REF" \
-    https://github.com/NousResearch/hermes-agent.git /opt/hermes
+RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes && \
+    git -C /opt/hermes fetch --depth 1 origin "$HERMES_REF" && \
+    git -C /opt/hermes checkout --detach FETCH_HEAD
 
 RUN uv python install 3.12 && \
     uv venv --python 3.12 /opt/hermes/venv && \
@@ -48,16 +49,14 @@ RUN /opt/hermes/venv/bin/python -c \
 RUN ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes && \
     /usr/local/bin/hermes --version
 
-COPY patches/ /opt/patches/
-RUN git -C /opt/hermes apply /opt/patches/video-note.patch && \
-    echo "Applied: video-note.patch" && \
-    git -C /opt/hermes apply /opt/patches/stt-local-files-only.patch && \
-    echo "Applied: stt-local-files-only.patch" && \
-    git -C /opt/hermes apply /opt/patches/context-read-bounded.patch && \
-    echo "Applied: context-read-bounded.patch"
+# Repository-managed Firebrowsing assets. Runtime restore maps these into the
+# persistent Hermes home without modifying the upstream Hermes checkout.
+COPY firebrowsing/ /opt/firebrowsing/
+COPY restore-firebrowsing.sh /restore-firebrowsing.sh
+RUN chmod +x /restore-firebrowsing.sh
 
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /start.sh /entrypoint.sh
 
-ENTRYPOINT ["bash", "/start.sh"]
+ENTRYPOINT ["bash", "-c", "/restore-firebrowsing.sh && exec /start.sh"]
