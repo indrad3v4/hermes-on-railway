@@ -16,7 +16,161 @@ from __future__ import annotations
 
 import time
 import json
+import os
 import urllib.parse
+import urllib.request
+
+# ---------------------------------------------------------------------------
+# HTTP-first extraction + browser resource budget (see resource-exhaustion).
+# LEAK RULE: never call new_tab() per URL. Reuse ONE tab via goto_url().
+# Every new_tab() → Target.createTarget → a persistent Chromium renderer
+# (~17-26 OS threads, ~100 MB RSS) that nothing auto-closes. In a shared cgroup
+# this exhausts pids.max → RuntimeError: can't start new thread across the box.
+# ---------------------------------------------------------------------------
+
+# Safety cap (defence-in-depth): number of browser navigations per session.
+# The real fix is tab reuse; this only prevents an unbounded sweep from ever
+# turning into a crash-instead-of-incomplete result. Bounded by measured cgroup
+# budget (pids.max=1000, ~40 renderers x ~17 threads), not a magic number.
+MAX_PAGES_PER_BROWSER_SESSION = int(os.environ.get("MAX_PAGES_PER_BROWSER_SESSION", "25"))
+MAX_BROWSER_FALLBACKS = int(os.environ.get("MAX_BROWSER_FALLBACKS", "10"))
+
+# Per-host telemetry (Principle #22): appended after each fetch so an interrupted
+# run still reports per-host success/fallback/failure/duration. Path must NOT
+# depend on __file__ (unreliable under exec() in the browser harness) — anchor
+# to $HERMES_HOME/logs or the well-known /root/.hermes/logs.
+_HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+_TELEMETRY_PATH = os.environ.get(
+    "FIREBROWSING_TELEMETRY",
+    os.path.join(_HERMES_HOME, "logs", "firebrowsing_telemetry.jsonl"),
+)
+# session-scoped counters (reset when this module is exec'd fresh per browser_exec)
+_BROWSER_NAV_COUNT = 0
+
+
+def _record_telemetry(entry: dict) -> None:
+    entry.setdefault("ts", time.time())
+    try:
+        os.makedirs(os.path.dirname(_TELEMETRY_PATH), exist_ok=True)
+        with open(_TELEMETRY_PATH, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def http_fetch(url: str, timeout: float = 15.0, max_bytes: int = 2_000_000) -> dict:
+    """Fetch a URL over plain HTTP/static extraction. No browser, no tabs.
+
+    Returns {"success": True, "html": str} or {"success": False, "error": str}.
+    Use this BEFORE reaching for the browser: it is the zero-resource path and
+    handles the vast majority of sites (durations/thumbs/titles live in static
+    HTML/OG meta even on JS-heavy pages).
+    """
+    start = time.time()
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.google.com/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read(max_bytes).decode("utf-8", errors="replace")
+        _record_telemetry({
+            "host": urllib.parse.urlparse(url).netloc,
+            "url": url,
+            "path": "http",
+            "ok": True,
+            "bytes": len(data),
+            "duration_ms": int((time.time() - start) * 1000),
+        })
+        return {"success": True, "html": data, "duration_ms": int((time.time() - start) * 1000)}
+    except Exception as e:
+        _record_telemetry({
+            "host": urllib.parse.urlparse(url).netloc,
+            "url": url,
+            "path": "http",
+            "ok": False,
+            "error": str(e)[:200],
+            "duration_ms": int((time.time() - start) * 1000),
+        })
+        return {"success": False, "error": str(e), "duration_ms": int((time.time() - start) * 1000)}
+
+
+def _browser_nav_budget_ok() -> bool:
+    """Guard: refuse a NEW browser navigation past the session cap.
+
+    Called by resilient_scrape() BEFORE it would navigate the tab. Returns True
+    if we're under budget. When False, the caller falls back to HTTP-only (already
+    tried) and reports a typed 'budget_exceeded' — never a hard crash.
+    """
+    global _BROWSER_NAV_COUNT
+    if _BROWSER_NAV_COUNT >= MAX_PAGES_PER_BROWSER_SESSION:
+        return False
+    return True
+
+
+def _inc_browser_nav() -> None:
+    global _BROWSER_NAV_COUNT
+    _BROWSER_NAV_COUNT += 1
+
+
+def resilient_scrape(url: str, formats: list[str] | None = None,
+                     http_first: bool = True, max_browser_fallbacks: int | None = None) -> dict:
+    """Extract a page: HTTP-first, browser only as a fallback, never a per-URL tab.
+
+    This is the ONLY entry point research workflows should call. It guarantees:
+      - plain HTTP extraction attempted first (zero browser resource);
+      - browser navigation reuses the existing single tab via goto_url() (never
+        new_tab() per URL);
+      - the browser path is skipped entirely once MAX_BROWSER_FALLBACKS or the
+        session page budget is exhausted — returning a typed result instead of
+        accumulating renderers into a crash.
+    """
+    formats = formats or ["markdown"]
+    host = urllib.parse.urlparse(url).netloc
+    budget = max_browser_fallbacks if max_browser_fallbacks is not None else MAX_BROWSER_FALLBACKS
+
+    # --- Level 1: HTTP-first (the main path) --------------------------------
+    if http_first:
+        http = http_fetch(url)
+        if http.get("success"):
+            # Minimal HTML→markdown-ish extraction from static HTML via text strip.
+            # For structured fields (duration, title, performers) the raw HTML is
+            # enough; callers parse with their own selectors/JSON-LD logic.
+            return {"success": True, "source": "http", "html": http["html"],
+                    "url": url, "metadata": {}, "formats": formats,
+                    "duration_ms": http.get("duration_ms")}
+
+    # --- Level 2: browser fallback (bounded, tab-reuse) ---------------------
+    if budget <= 0 or not _browser_nav_budget_ok():
+        _record_telemetry({"host": host, "url": url, "path": "browser_skipped",
+                           "ok": False, "error": "budget_exceeded",
+                           "reason": f"http={'ok' if http_first and http.get('success') else 'fail'} browser_budget={budget}"})
+        return {"success": False, "url": url, "error": "budget_exceeded",
+                "source": "http_failed", "reason": "browser resource budget exhausted"}
+
+    start = time.time()
+    try:
+        _inc_browser_nav()
+        result = scrape_url(url, formats)  # uses goto_url() on the single tab
+        ok = bool(result)
+        _record_telemetry({
+            "host": host, "url": url, "path": "browser", "ok": ok,
+            "error": None if ok else "scrape_failed",
+            "duration_ms": int((time.time() - start) * 1000),
+        })
+        if not ok:
+            return {"success": False, "url": url, "error": "scrape_failed", "source": "browser"}
+        result.update({"source": "browser", "success": True})
+        return result
+    except Exception as e:
+        _record_telemetry({"host": host, "url": url, "path": "browser", "ok": False,
+                           "error": str(e)[:200], "duration_ms": int((time.time() - start) * 1000)})
+        return {"success": False, "url": url, "error": str(e), "source": "browser"}
 
 
 def extract_markdown(only_main_content: bool = True) -> str:
@@ -115,10 +269,11 @@ def search_duckduckgo(query: str, limit: int = 5) -> list[dict]:
     DuckDuckGo HTML with automatic Bing fallback when DDG serves a bot-captcha.
     """
     import os
-    if os.environ.get("SEARXNG_URL"):
-        r = search_searxng(query, limit=limit)
-        if r:
-            return r
+    # Try SearXNG first (env var, else the baked-in box-internal address), then
+    # fall back to DDG/Bing when it returns nothing.
+    r = search_searxng(query, limit=limit)
+    if r:
+        return r
     url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
     try:
         goto_url(url)
@@ -174,9 +329,10 @@ def search_bing(query: str, limit: int = 5) -> list[dict]:
 def search_searxng(query: str, limit: int = 5, searxng_url: str | None = None) -> list[dict]:
     """Web search via a self-hosted SearXNG JSON API."""
     import os, urllib.request
-    base = searxng_url or os.environ.get("SEARXNG_URL", "")
-    if not base:
-        return []
+    # Fallback to the box-internal service DNS: the Railway var SEARXNG_URL is lost
+    # on redeploy, so the address is baked here to keep search alive without it.
+    DEFAULT_SEARXNG_URL = "http://searxng.railway.internal:8080"
+    base = searxng_url or os.environ.get("SEARXNG_URL") or DEFAULT_SEARXNG_URL
     base = base.rstrip("/")
     url = f"{base}/search?q={urllib.parse.quote(query)}&format=json"
     try:
