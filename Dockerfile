@@ -28,6 +28,25 @@ RUN uv python install 3.12 && \
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         pymupdf python-docx faster-whisper librosa browser-use
 
+# ── Code-visualization arsenal ──────────────────────────────────────────
+# Indra's rule: every reply's core message is rendered by CODE (never an
+# image model). /opt is ephemeral per container, so the arsenal must be baked
+# into the image or it silently disappears (that already happened once).
+# graphviz `dot` unlocks diagrams/graphviz/pydot. Kept to wheels-only +
+# pure-python so the build needs no compiler; heavy 3D stacks (vtk/pyvista/
+# open3d/mayavi) are deliberately out until a real need shows up.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends graphviz && \
+    rm -rf /var/lib/apt/lists/*
+RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
+        matplotlib seaborn pandas networkx graphviz pydot \
+        diagrams schemdraw svgwrite drawsvg pygal \
+        plotly kaleido altair vl-convert-python \
+        tabulate prettytable fpdf2 img2pdf svglib \
+        wordcloud squarify pywaffle xlsxwriter openpyxl \
+        imageio imageio-ffmpeg geopandas folium && \
+    /opt/hermes/venv/bin/python -c "import matplotlib, networkx, plotly, diagrams, geopandas; print('viz arsenal OK')"
+
 # ── Bake the STT model into the image ───────────────────────────────────
 # stt.local.model → /opt/hermes-models/turbo (path-based → loaded locally, no HF
 # download at runtime). /opt is ephemeral per container AND the 4.6 GB volume
@@ -65,8 +84,14 @@ COPY firebrowsing/ /opt/firebrowsing/
 COPY restore-firebrowsing.sh /restore-firebrowsing.sh
 RUN chmod +x /restore-firebrowsing.sh
 
+# Repository-managed skills (author-owned files only; book corpora stay on the
+# volume — see restore-skills.sh).
+COPY skills/ /opt/hermes-skills/
+COPY restore-skills.sh /restore-skills.sh
+RUN chmod +x /restore-skills.sh
+
 COPY start.sh /start.sh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /start.sh /entrypoint.sh
 
-ENTRYPOINT ["bash", "-c", "/restore-firebrowsing.sh && exec /start.sh"]
+ENTRYPOINT ["bash", "-c", "/restore-firebrowsing.sh && /restore-skills.sh && exec /start.sh"]
