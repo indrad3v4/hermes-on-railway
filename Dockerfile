@@ -28,6 +28,16 @@ RUN uv python install 3.12 && \
 RUN uv pip install --python /opt/hermes/venv/bin/python --no-cache \
         pymupdf python-docx faster-whisper librosa browser-use
 
+# ── Bake the STT model into the image ───────────────────────────────────
+# stt.local.model → /opt/hermes-models/turbo (path-based → loaded locally, no HF
+# download at runtime). /opt is ephemeral per container AND the 4.6 GB volume
+# cannot hold the 1.6 GB model, so bake it into the image — it then survives
+# redeploys because the image is rebuilt from this Dockerfile each deploy.
+RUN mkdir -p /opt/hermes-models && \
+    /opt/hermes/venv/bin/python -c "from faster_whisper.utils import download_model; \
+        download_model('turbo', output_dir='/opt/hermes-models/turbo')" && \
+    ls -la /opt/hermes-models/turbo
+
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
 
