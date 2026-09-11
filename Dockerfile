@@ -87,6 +87,7 @@ RUN chmod +x /restore-firebrowsing.sh
 # Repository-managed skills (author-owned files only; book corpora stay on the
 # volume — see restore-skills.sh).
 COPY skills/ /opt/hermes-skills/
+COPY agent-scripts/ /opt/hermes-agent-scripts/
 COPY restore-skills.sh /restore-skills.sh
 RUN chmod +x /restore-skills.sh
 

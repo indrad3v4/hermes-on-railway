@@ -1,22 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
-# Restore repository-managed Hermes skills into the persistent HERMES_HOME.
+# Restore repository-managed Hermes assets into the persistent HERMES_HOME.
 #
 # Same contract as restore-firebrowsing.sh: the repo is the source of truth for
-# skill FILES, and a changed image backs up the live copy before replacing it, so
-# a redeploy can never silently destroy a live customization.
+# the files it manages; anything else on the volume is left alone.
 #
-# The book corpora (skills/*/*/corpus/*) are deliberately NOT shipped in the image
-# — they are large and contain third-party book text. They live on the volume only.
+#   /opt/hermes-skills/*        -> $HERMES_HOME/skills/*
+#   /opt/hermes-agent-scripts/* -> $HERMES_HOME/scripts/*
+#
+# Binary/large corpora (book OCR text) are deliberately NOT in the image — they
+# stay on the volume (see the repo README / token-economics report).
 
 HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
-SRC="/opt/hermes-skills"
+SKILLS_SRC="/opt/hermes-skills"
+SCRIPTS_SRC="/opt/hermes-agent-scripts"
 
 restore_one() {
-    local src="$1" dst="$2" mode="0644"
+    local src="$1" dst="$2" mode="${3:-0644}"
     [ -f "$src" ] || return 0
-    case "$src" in *.py|*.sh) mode="0755" ;; esac
     mkdir -p "$(dirname "$dst")"
     if [ -f "$dst" ]; then
         if cmp -s "$src" "$dst"; then
@@ -33,13 +35,25 @@ restore_one() {
     echo "   restored: $dst"
 }
 
-if [ ! -d "$SRC" ]; then
-    echo "→ Repo skills not present in image; skipping"
+restore_tree() {
+    local src="$1" dst_root="$2" default_mode="$3"
+    [ -d "$src" ] || return 0
+    while IFS= read -r -d '' f; do
+        local rel="${f#"$src"/}" mode="$default_mode"
+        case "$f" in
+            *.sh|*.py) mode="0755" ;;
+        esac
+        restore_one "$f" "$dst_root/$rel" "$mode"
+    done < <(find "$src" -type f -print0)
+}
+
+if [ ! -d "$SKILLS_SRC" ] && [ ! -d "$SCRIPTS_SRC" ]; then
+    echo "→ Repo skills/scripts not present in image; skipping"
     exit 0
 fi
 
 echo "→ Restoring repository-managed skills..."
-while IFS= read -r -d '' f; do
-    rel="${f#"$SRC"/}"
-    restore_one "$f" "$HERMES_HOME/skills/$rel"
-done < <(find "$SRC" -type f -print0)
+restore_tree "$SKILLS_SRC" "$HERMES_HOME/skills" "0644"
+
+echo "→ Restoring repository-managed agent scripts..."
+restore_tree "$SCRIPTS_SRC" "$HERMES_HOME/scripts" "0644"

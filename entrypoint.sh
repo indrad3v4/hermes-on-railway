@@ -291,6 +291,17 @@ echo "→ Pinning auxiliary.vision → cometapi + stt → local turbo..."
 /opt/hermes/venv/bin/hermes config set auxiliary.vision.model deepseek-v4-flash-vision-exp >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
 /opt/hermes/venv/bin/hermes config set stt.provider local                  >/dev/null 2>&1 || echo "   ⚠ failed: stt.provider"
 /opt/hermes/venv/bin/hermes config set stt.local.model /opt/hermes-models/turbo >/dev/null 2>&1 || echo "   ⚠ failed: stt.local.model"
+
+# Session-handoff protocol (TRIZ resolution of the token-economics problem #1).
+# quick_commands with type=exec run on the host with NO LLM call → zero tokens.
+echo "→ Ensuring session-handoff quick commands (/handoff /brief /handoffs)..."
+HS="/opt/hermes/venv/bin/python3 /root/.hermes/scripts/session_handoff.py"
+/opt/hermes/venv/bin/hermes config set quick_commands.handoff.type exec           >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoff.type"
+/opt/hermes/venv/bin/hermes config set quick_commands.handoff.command "$HS"       >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoff.command"
+/opt/hermes/venv/bin/hermes config set quick_commands.brief.type exec             >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.brief.type"
+/opt/hermes/venv/bin/hermes config set quick_commands.brief.command "$HS --brief" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.brief.command"
+/opt/hermes/venv/bin/hermes config set quick_commands.handoffs.type exec          >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoffs.type"
+/opt/hermes/venv/bin/hermes config set quick_commands.handoffs.command "$HS --list" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoffs.command"
 echo "   ✓ aux vision (cometapi) + STT (local turbo) pins applied"
 
 # ── Thread/resource diagnostics ─────────────────────────────────────────
