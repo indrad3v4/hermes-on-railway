@@ -250,7 +250,7 @@ if not config_path.exists():
     print("   config.yaml not found — skipping (fresh install)")
     raise SystemExit(0)
 text = config_path.read_text()
-desired_model_block = "model:\n  default: deepseek/deepseek-v4-flash-0731\n  provider: nous\n"
+desired_model_block = "model:\n  default: deepseek/deepseek-v4.1-flash\n  provider: nous\n"
 pattern = r'(?m)^model:\n(?:(?:[ \t]+.*|)\n)*'
 match = re.search(pattern, text)
 if match:
@@ -262,7 +262,7 @@ if match:
 else:
     new_text = desired_model_block + "\n" + text
 config_path.write_text(new_text)
-print("   ✓ primary model restored: deepseek/deepseek-v4-flash-0731 (provider=nous)")
+print("   ✓ primary model restored: deepseek/deepseek-v4.1-flash (provider=nous)")
 PYEOF
 
 echo "→ Fixing toolset name: a2a → hermes-telegram..."
@@ -280,6 +280,18 @@ if new_text != text:
 else:
     print("   ✓ toolset already hermes-telegram")
 PYEOF
+
+# ── Aux-task + STT pins (durable across redeploys) ──────────────────────
+# vision: default auto resolves to nous/stepfun (no vision support) → HTTP 404.
+#   Pin CometAPI deepseek vision (verified working, cost_cny 0.0001/call).
+# STT: provider "nous" maps to openai/whisper-1 (transcription_tools.py:256),
+#   which ignores the local model → pin local turbo.
+echo "→ Pinning auxiliary.vision → cometapi + stt → local turbo..."
+/opt/hermes/venv/bin/hermes config set auxiliary.vision.provider cometapi   >/dev/null 2>&1 || echo "   ⚠ failed: vision.provider"
+/opt/hermes/venv/bin/hermes config set auxiliary.vision.model deepseek-v4-flash-vision-exp >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
+/opt/hermes/venv/bin/hermes config set stt.provider local                  >/dev/null 2>&1 || echo "   ⚠ failed: stt.provider"
+/opt/hermes/venv/bin/hermes config set stt.local.model /opt/hermes-models/turbo >/dev/null 2>&1 || echo "   ⚠ failed: stt.local.model"
+echo "   ✓ aux vision (cometapi) + STT (local turbo) pins applied"
 
 # ── Thread/resource diagnostics ─────────────────────────────────────────
 echo ""
