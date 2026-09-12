@@ -302,7 +302,11 @@ HS="/opt/hermes/venv/bin/python3 /root/.hermes/scripts/session_handoff.py"
 /opt/hermes/venv/bin/hermes config set quick_commands.brief.command "$HS --brief" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.brief.command"
 /opt/hermes/venv/bin/hermes config set quick_commands.handoffs.type exec          >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoffs.type"
 /opt/hermes/venv/bin/hermes config set quick_commands.handoffs.command "$HS --list" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.handoffs.command"
-echo "   ✓ aux vision (cometapi) + STT (local turbo) pins applied"
+
+# /pwa → python-viz-arsenal skill (alias, zero tokens)
+/opt/hermes/venv/bin/hermes config set quick_commands.pwa.type alias            >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.pwa.type"
+/opt/hermes/venv/bin/hermes config set quick_commands.pwa.target "Draw with Python viz arsenal:" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.pwa.target"
+echo "   ✓ aux vision (cometapi) + STT (local turbo) + /pwa alias pins applied"
 
 # ── Thread/resource diagnostics ─────────────────────────────────────────
 echo ""
