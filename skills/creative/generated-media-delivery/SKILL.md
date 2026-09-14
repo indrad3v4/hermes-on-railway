@@ -140,7 +140,7 @@ rendered by code. Structural replies add a full diagram ON TOP of the card.
 
 - **Core card (v2, 2026-09-12):** `/opt/hermes/venv/bin/python3 /root/.hermes/scripts/render_core.py --kicker "<date · topic>" --status ok --core "<the one sentence>" --lines "<see syntax>" --foot "<next step>" -o /root/.hermes/media/cards/core-<ts>.png`
   — 1240 px, ~0.7 s, ~120 KB, `--check` prints the chromium path.
-  **`--lines` mini-syntax** (pipe-separated, order preserved): `#LABEL` → small-caps section header ·
+  `--lines` mini-syntax (pipe-separated, order preserved): `#LABEL` → section header ·
   `key :: value` → two-column row (muted label left, ink value right — the scannable workhorse) ·
   anything else → bullet. `**bold**` inside `--core`/values paints that token in the accent — use it
   on the ONE number that matters. `--status ok|warn|bad|info` prints a verdict chip top-right
@@ -157,6 +157,8 @@ rendered by code. Structural replies add a full diagram ON TOP of the card.
 - **NO EMOJI IN CARDS.** Nimbus Sans has no emoji glyphs, so `✅`/`⚠️`/`🔧` render as tofu boxes (empty
   squares) and look broken. Use the text glyphs the font actually has: `✓ ✕ · — → ≥ ≤ %`. Same reason
   `[x]` checklists don't render — use `•`.
+- **Vision contrast calls can lie — verify with code.** The vision model once rated label contrast at <4:1 (would fail AA) while the actual measured contrast of `#5a5a5a` on white was 6.9:1. The model confuses *visual prominence* (font size/weight) with *contrast ratio*; always confirm with a one-liner `(L1+0.05)/(L2+0.05)`, or don't claim the token is met.
+- **Escape Cyrillic when invoking from bash `-c`.** `ё` in a double-quoted bash string passed to `python3 -c "..."` is read fine by Python, but any `awk`/`sed` on it needs the byte sequence intact — prefer writing the payload to a temp `.py` file and running that, so locale/`LANG` settings never mangle the glyphs.
 - **The card must be the ONE message you are trying to get across in that reply** — not a summary
   of the actions taken, not a status list. If you cannot state it in one sentence, the reply has no
   core yet. (User's wording: «то сообщение, которое ты стремишься донести мне в респонсе».)
