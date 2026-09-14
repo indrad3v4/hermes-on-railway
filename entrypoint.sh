@@ -22,7 +22,8 @@ chmod 600 "$ENV_FILE"
 
 PROVIDER_KEYS=""
 for VAR in NOUS_PORTAL_TOKEN NOUS_API_KEY \
-           HF_TOKEN FIRECRAWL_API_KEY GITHUB_TOKEN; do
+           HF_TOKEN FIRECRAWL_API_KEY GITHUB_TOKEN \
+           DEEPSEEK_API_KEY FAL_KEY; do
     if [ -n "${!VAR}" ]; then
         echo "${VAR}=${!VAR}" >> "$ENV_FILE"
         PROVIDER_KEYS="${PROVIDER_KEYS} ${VAR}"
@@ -250,7 +251,7 @@ if not config_path.exists():
     print("   config.yaml not found — skipping (fresh install)")
     raise SystemExit(0)
 text = config_path.read_text()
-desired_model_block = "model:\n  default: deepseek/deepseek-v4.1-flash\n  provider: nous\n"
+desired_model_block = "model:\n  default: deepseek-flash\n  provider: deepseek\n"
 pattern = r'(?m)^model:\n(?:(?:[ \t]+.*|)\n)*'
 match = re.search(pattern, text)
 if match:
@@ -262,7 +263,7 @@ if match:
 else:
     new_text = desired_model_block + "\n" + text
 config_path.write_text(new_text)
-print("   ✓ primary model restored: deepseek/deepseek-v4.1-flash (provider=nous)")
+print("   ✓ primary model restored: deepseek-flash (provider=deepseek)")
 PYEOF
 
 echo "→ Fixing toolset name: a2a → hermes-telegram..."
