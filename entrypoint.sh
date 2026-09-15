@@ -379,6 +379,35 @@ if [ "${HERMES_THREAD_WATCHDOG:-true}" = "true" ]; then
     ) &
 fi
 
+# ── DeepSeek Harness (dsh) runtime guard ────────────────────────────────
+# The image bakes Node + dsh, but two things must hold at RUNTIME or dsh is
+# silently dead (it installs fine and then dies with MISSING_CREDENTIAL):
+#   1. dsh reads DEEPSEEK_API_KEY from its environment, and Hermes does NOT
+#      pass container secrets to its terminal children — so wrap the binary
+#      to load ~/.hermes/.env (written above) first.
+#   2. DSH_HOME must sit on the persistent volume; ~/.dsh is ephemeral and is
+#      re-created on every container start.
+# Idempotent, and it also repairs a container started from an OLDER image —
+# so no image rebuild is required for this part.
+if [ -f /usr/local/bin/dsh.real ] || [ -e /usr/local/bin/dsh ]; then
+    if [ ! -e /usr/local/bin/dsh.real ]; then
+        mv /usr/local/bin/dsh /usr/local/bin/dsh.real 2>/dev/null || true
+    fi
+    if [ -e /usr/local/bin/dsh.real ]; then
+        cat > /usr/local/bin/dsh <<'DSHWRAP'
+#!/bin/bash
+: "${HERMES_HOME:=/root/.hermes}"
+if [ -f "$HERMES_HOME/.env" ]; then set -a; . "$HERMES_HOME/.env"; set +a; fi
+: "${DSH_HOME:=$HERMES_HOME/dsh}"
+export DSH_HOME
+exec /usr/local/bin/dsh.real "$@"
+DSHWRAP
+        chmod +x /usr/local/bin/dsh
+    fi
+fi
+export DSH_HOME="${DSH_HOME:-/root/.hermes/dsh}"
+mkdir -p "$DSH_HOME" 2>/dev/null || true
+
 # ── Start gateway ───────────────────────────────────────────────────────
 echo "→ Starting Hermes Telegram gateway (polling mode)..."
 exec hermes gateway run
