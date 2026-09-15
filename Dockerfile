@@ -75,7 +75,24 @@ RUN curl -fsSLo /tmp/node.tar.xz \
 RUN npm install -g \
         --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs \
         @deepseek-ai/dsh && \
-    command -v dsh && dsh --version
+    /usr/local/bin/dsh --version
+
+# dsh reads DEEPSEEK_API_KEY from its environment, but Hermes does not pass
+# container secrets to terminal children — a bare `dsh` then dies with
+# MISSING_CREDENTIAL even though the key is in PID 1's env and in .env. Wrap
+# the real binary so `dsh` always loads the persisted .env the entrypoint
+# writes. Also pin DSH_HOME onto the persistent volume: /root/.dsh is
+# ephemeral and is re-created (profiles, sessions, storages) on every deploy.
+RUN mv /usr/local/bin/dsh /usr/local/bin/dsh.real && \
+    printf '%s\n' '#!/bin/bash' \
+        ': "${HERMES_HOME:=/root/.hermes}"' \
+        'if [ -f "$HERMES_HOME/.env" ]; then set -a; . "$HERMES_HOME/.env"; set +a; fi' \
+        ': "${DSH_HOME:=$HERMES_HOME/dsh}"' \
+        'export DSH_HOME' \
+        'exec /usr/local/bin/dsh.real "$@"' > /usr/local/bin/dsh && \
+    chmod +x /usr/local/bin/dsh && \
+    /usr/local/bin/dsh.real --version
+ENV DSH_HOME=/root/.hermes/dsh
 
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
