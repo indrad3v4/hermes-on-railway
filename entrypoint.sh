@@ -250,7 +250,7 @@ if not config_path.exists():
     print("   config.yaml not found — skipping (fresh install)")
     raise SystemExit(0)
 text = config_path.read_text()
-desired_model_block = "model:\n  default: deepseek/deepseek-v4.1-flash\n  provider: nous\n  base_url: https://inference-api.nousresearch.com/v1\n  streaming: false\n"
+desired_model_block = "model:\n  default: deepseek-flash\n  provider: deepseek\n  base_url: https://api.deepseek.com/v1\n  streaming: false\n"
 pattern = r'(?m)^model:\n(?:(?:[ \t]+.*|)\n)*'
 match = re.search(pattern, text)
 if match:
@@ -262,7 +262,7 @@ if match:
 else:
     new_text = desired_model_block + "\n" + text
 config_path.write_text(new_text)
-print("   ✓ primary model restored: deepseek/deepseek-v4.1-flash (provider=nous, streaming=false)")
+print("   ✓ primary model restored: deepseek-flash (provider=deepseek, api.deepseek.com, streaming=false)")
 PYEOF
 
 echo "→ Fixing toolset name: a2a → hermes-telegram..."

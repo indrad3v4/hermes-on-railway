@@ -57,6 +57,26 @@ RUN mkdir -p /opt/hermes-models && \
         download_model('turbo', output_dir='/opt/hermes-models/turbo')" && \
     ls -la /opt/hermes-models/turbo
 
+# ── Node.js + DeepSeek Harness (dsh) — DEFAULT agentic-coding harness ───
+# Indra's decision (2026-09-14): dsh is the default harness for agentic
+# coding. A manual `npm i -g` dies on redeploy — that is exactly how Cline
+# was lost on this box — so Node + dsh are baked into the IMAGE, not the
+# entrypoint. dsh runs against DeepSeek direct (DEEPSEEK_API_KEY): the Nous
+# agent_key rotates hourly and its balance is unpredictable.
+ARG NODE_VERSION=24.21.0
+RUN curl -fsSLo /tmp/node.tar.xz \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" && \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && \
+    rm -f /tmp/node.tar.xz && \
+    node --version && npm --version
+# --allow-scripts: dsh's subprocess/pty helpers compile native code; blocking
+# them silently breaks command execution inside the harness (npm blocks
+# install scripts by default).
+RUN npm install -g \
+        --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs \
+        @deepseek-ai/dsh && \
+    command -v dsh && dsh --version
+
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
 
