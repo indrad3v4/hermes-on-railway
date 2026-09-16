@@ -94,6 +94,20 @@ RUN mv /usr/local/bin/dsh /usr/local/bin/dsh.real && \
     /usr/local/bin/dsh.real --version
 ENV DSH_HOME=/root/.hermes/dsh
 
+# ── OpenResearch CLI (`orx`) — the TASK-ANALYSIS layer ──────────────────
+# Indra's decision (2026-09-16): orx is the analysis layer of the coding
+# cycle, never the executor — dsh stays the executor (orx does not support it
+# as an agent). Runs headless: no dashboard, and `orx paper` / `orx discover`
+# are free and account-free. Baked into the IMAGE; a manual install dies on
+# redeploy (the Cline lesson).
+ARG ORX_VERSION=0.2.3
+RUN curl -fsSLo /tmp/orx.tar.xz \
+        "https://github.com/alphaXiv/OpenResearch/releases/download/v${ORX_VERSION}/openresearch-cli-x86_64-unknown-linux-musl.tar.xz" && \
+    tar -xJf /tmp/orx.tar.xz -C /tmp && \
+    install -m 0755 /tmp/openresearch-cli-x86_64-unknown-linux-musl/orx /usr/local/bin/orx && \
+    rm -rf /tmp/orx.tar.xz /tmp/openresearch-cli-x86_64-unknown-linux-musl && \
+    orx --version
+
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
 
