@@ -436,6 +436,18 @@ fi
 export DSH_HOME="${DSH_HOME:-/root/.hermes/dsh}"
 mkdir -p "$DSH_HOME" 2>/dev/null || true
 
+# ── Cline CLI state onto the VOLUME ─────────────────────────────────────
+# Cline keeps its auth + tasks in ~/.cline — on Railway that is the ephemeral
+# overlay, wiped on every deploy (the manual-install lesson, again). Point it at
+# the volume so the login survives. Indra's rule (2026-09-17): tools live in the
+# IMAGE, their state lives in /root/.hermes.
+mkdir -p /root/.hermes/cline
+if [ ! -L /root/.cline ]; then
+    if [ -d /root/.cline ]; then cp -a /root/.cline/. /root/.hermes/cline/ 2>/dev/null || true; fi
+    rm -rf /root/.cline 2>/dev/null || true
+    ln -sfn /root/.hermes/cline /root/.cline || true
+fi
+
 # ── Start gateway ───────────────────────────────────────────────────────
 echo "→ Starting Hermes Telegram gateway (polling mode)..."
 exec hermes gateway run

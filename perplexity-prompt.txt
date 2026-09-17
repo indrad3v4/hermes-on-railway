@@ -1,0 +1,36 @@
+You are operating on the Railway deployment repo `indrad3v4/hermes-on-railway`. The goal is to enable the Hermes `web_browsing` tool stack inside the EXISTING Railway service — NOT by creating a new service.
+
+## Current state (evidence)
+- `Dockerfile` builds `hermes-on-railway` and ends with `ENTRYPOINT ["bash", "/start.sh"]`.
+- `start.sh` does cleanup and execs `entrypoint.sh`.
+- `entrypoint.sh` currently sets:
+  - `HERMES_DISABLE_BROWSER=true`
+  - `HERMES_DISABLE_BROWSER_CDP=true`
+  - `HERMES_DISABLE_COMPUTER_USE=true`
+  - `HERMES_DISABLE_MOA=true`
+  - `HERMES_DISABLE_SELF_IMPROVEMENT=true`
+  - `HERMES_DISABLE_TIRITH=true`
+  Then runs `hermes gateway run`.
+- Railway container has no Chromium binary; browser tooling is intentionally disabled.
+- Public URL (`https://hermes-production-23fe.up.railway.app`) returns 502 — that is expected because the gateway exposes no HTTP UI. Do not treat 502 as a deployment failure.
+- Verified: on this box, apt chromium + headless CDP on :9222 works. `browser-use` CLI can be installed via `uv tool install --force browser-use` with `UV_TOOL_BIN_DIR=/root/.hermes/bin`.
+
+## Constraints
+- Do NOT add a second Railway service. Everything must live in the existing container.
+- Do NOT break Telegram gateway boot (`hermes gateway run` must still be the final exec).
+- Keep Railway-safe defaults unless explicitly changing browser-related ones.
+- Keep existing volume mount `/root/.hermes` and HF cache durability logic.
+- Do not expose secrets; Railway variables already provide keys.
+
+## Deliver me exactly this
+1) Minimal `Dockerfile` patch to install a headless Chromium binary into the image (prefer Debian `chromium` package).
+2) Minimal `start.sh` / `entrypoint.sh` patch sequence that:
+   - keeps Telegram boot,
+   - installs/repairs `browser-use` CLI link into `/root/.hermes/bin`,
+   - launches headless Chromium as a background CDP on `127.0.0.1:9222` with `--user-data-dir=/tmp/bu-cdp --no-sandbox --disable-dev-shm-usage`,
+   - flips browser-disable env vars to `false` so Hermes tool checks pass,
+   - waits up to 20s for CDP to come up before starting the gateway.
+3) One-line Railway deploy command to apply and redeploy.
+4) One-line runtime verification command to run inside Railway console after deploy (must confirm browser tools are available).
+
+Output as a minimal unified diff + shell commands. No extra prose.
