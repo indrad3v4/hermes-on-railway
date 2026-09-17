@@ -95,11 +95,13 @@ RUN mv /usr/local/bin/dsh /usr/local/bin/dsh.real && \
 ENV DSH_HOME=/root/.hermes/dsh
 
 # ── OpenResearch CLI (`orx`) — the TASK-ANALYSIS layer ──────────────────
-# Indra's decision (2026-09-16): orx is the analysis layer of the coding
-# cycle, never the executor — dsh stays the executor (orx does not support it
-# as an agent). Runs headless: no dashboard, and `orx paper` / `orx discover`
-# are free and account-free. Baked into the IMAGE; a manual install dies on
-# redeploy (the Cline lesson).
+# Indra's decision (2026-09-16, executor corrected 2026-09-17): orx is the
+# analysis layer of the coding cycle, never the executor. The executor seat is
+# CLINE's, not dsh's — dsh's only installed profile (`headless`) has no tools at
+# all (it answers one question and exits; verified by two runs with zero tool
+# calls). Runs headless: no dashboard, and `orx paper` / `orx discover` are free
+# and account-free. Baked into the IMAGE; a manual install dies on redeploy
+# (the Cline lesson).
 ARG ORX_VERSION=0.2.3
 RUN curl -fsSLo /tmp/orx.tar.xz \
         "https://github.com/alphaXiv/OpenResearch/releases/download/v${ORX_VERSION}/openresearch-cli-x86_64-unknown-linux-musl.tar.xz" && \
@@ -107,6 +109,16 @@ RUN curl -fsSLo /tmp/orx.tar.xz \
     install -m 0755 /tmp/openresearch-cli-x86_64-unknown-linux-musl/orx /usr/local/bin/orx && \
     rm -rf /tmp/orx.tar.xz /tmp/openresearch-cli-x86_64-unknown-linux-musl && \
     orx --version
+
+# ── Cline CLI (`cline`) — the EXECUTOR of the agentic-coding cycle ──────
+# Indra's decision (2026-09-17): Cline executes; dsh analyses. Cline was
+# installed by hand once before and was wiped by the very next redeploy — that
+# lesson is why this lives in the IMAGE. Install is unpinned so the free-model
+# lane (Cline provider) tracks upstream; the version prints into the build log
+# as proof the binary actually landed.
+RUN npm i -g cline 2>&1 | tail -5 && \
+    (cline --version 2>&1 || echo "WARN: cline installed but --version failed") && \
+    which cline
 
 ENV UV_TOOL_BIN_DIR=/root/.hermes/bin
 RUN UV_TOOL_BIN_DIR=/root/.hermes/bin uv tool install --force browser-use || true
