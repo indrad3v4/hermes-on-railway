@@ -283,12 +283,26 @@ PYEOF
 
 # ── Aux-task + STT pins (durable across redeploys) ──────────────────────
 # vision: default auto resolves to nous/stepfun (no vision support) → HTTP 404.
-#   Pin CometAPI deepseek vision (verified working, cost_cny 0.0001/call).
+#   TWO routes exist and BOTH matter:
+#     • cometapi / deepseek-v4-flash-vision-exp — Indra's PREFERRED route (he pays for it
+#       for its uncensored handling). The key stays VALID at zero balance; a drained
+#       balance only shows up as HTTP 403 `insufficient_user_quota`.
+#     • deepseek / deepseek-flash — the MAIN route; reads images natively (verified live
+#       2026-09-17, HTTP 200, synthetic text read correctly). NO uncensored handling:
+#       it is a fallback, never a replacement.
+#   The gateway vision tool has no fallback of its own, so this pin decides everything.
+#   Default = deepseek (works at any balance). When CometAPI is topped up, set
+#   VISION_PROVIDER=cometapi in the service env (or run scripts/vision_route.sh cometapi)
+#   to return to the uncensored route.
+#   Per-image auto-fallback (cometapi first, deepseek on 402/403/429):
+#       /opt/hermes/venv/bin/python3 /root/.hermes/scripts/vision_auto.py <image>
 # STT: provider "nous" maps to openai/whisper-1 (transcription_tools.py:256),
 #   which ignores the local model → pin local turbo.
-echo "→ Pinning auxiliary.vision → cometapi + stt → local turbo..."
-/opt/hermes/venv/bin/hermes config set auxiliary.vision.provider cometapi   >/dev/null 2>&1 || echo "   ⚠ failed: vision.provider"
-/opt/hermes/venv/bin/hermes config set auxiliary.vision.model deepseek-v4-flash-vision-exp >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
+VIS_PROV="${VISION_PROVIDER:-deepseek}"
+if [ "$VIS_PROV" = "cometapi" ]; then VIS_MODEL="deepseek-v4-flash-vision-exp"; else VIS_MODEL="deepseek-flash"; fi
+echo "→ Pinning auxiliary.vision → $VIS_PROV/$VIS_MODEL + stt → local turbo..."
+/opt/hermes/venv/bin/hermes config set auxiliary.vision.provider "$VIS_PROV" >/dev/null 2>&1 || echo "   ⚠ failed: vision.provider"
+/opt/hermes/venv/bin/hermes config set auxiliary.vision.model "$VIS_MODEL" >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
 /opt/hermes/venv/bin/hermes config set stt.provider local                  >/dev/null 2>&1 || echo "   ⚠ failed: stt.provider"
 /opt/hermes/venv/bin/hermes config set stt.local.model /opt/hermes-models/turbo >/dev/null 2>&1 || echo "   ⚠ failed: stt.local.model"
 
@@ -306,7 +320,7 @@ HS="/opt/hermes/venv/bin/python3 /root/.hermes/scripts/session_handoff.py"
 # /pwa → python-viz-arsenal skill (alias, zero tokens)
 /opt/hermes/venv/bin/hermes config set quick_commands.pwa.type alias            >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.pwa.type"
 /opt/hermes/venv/bin/hermes config set quick_commands.pwa.target "Draw with Python viz arsenal:" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.pwa.target"
-echo "   ✓ aux vision (cometapi) + STT (local turbo) + /pwa alias pins applied"
+echo "   ✓ aux vision ($VIS_PROV/$VIS_MODEL) + STT (local turbo) + /pwa alias pins applied"
 
 # ── Thread/resource diagnostics ─────────────────────────────────────────
 echo ""
