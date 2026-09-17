@@ -298,8 +298,22 @@ PYEOF
 #       /opt/hermes/venv/bin/python3 /root/.hermes/scripts/vision_auto.py <image>
 # STT: provider "nous" maps to openai/whisper-1 (transcription_tools.py:256),
 #   which ignores the local model → pin local turbo.
+#   VISION_PROVIDER must name a provider that ACTUALLY EXISTS in config.yaml —
+#   stale Railway Variables are a real hazard: `VISION_PROVIDER=openai` +
+#   `VISION_MODEL=accounts/fireworks/models/gemma-4-31b-it` were left over from an
+#   earlier scheme and made the tool point at a provider with no base_url/key, so
+#   every image analysis failed. Unknown values are therefore REJECTED, not honoured.
+#   The MODEL is DERIVED from the provider, never taken from env: a stale
+#   VISION_MODEL leaks into whichever provider is active and silently pairs a
+#   provider with a foreign model (seen live: cometapi + an accounts/fireworks/...
+#   model). One source of truth beats two.
 VIS_PROV="${VISION_PROVIDER:-deepseek}"
-if [ "$VIS_PROV" = "cometapi" ]; then VIS_MODEL="deepseek-v4-flash-vision-exp"; else VIS_MODEL="deepseek-flash"; fi
+case "$VIS_PROV" in
+  cometapi)  VIS_MODEL="deepseek-v4-flash-vision-exp" ;;
+  deepseek)  VIS_MODEL="deepseek-flash" ;;
+  *) echo "   ⚠ VISION_PROVIDER='$VIS_PROV' is not a configured provider — using deepseek"
+     VIS_PROV=deepseek; VIS_MODEL="deepseek-flash" ;;
+esac
 echo "→ Pinning auxiliary.vision → $VIS_PROV/$VIS_MODEL + stt → local turbo..."
 /opt/hermes/venv/bin/hermes config set auxiliary.vision.provider "$VIS_PROV" >/dev/null 2>&1 || echo "   ⚠ failed: vision.provider"
 /opt/hermes/venv/bin/hermes config set auxiliary.vision.model "$VIS_MODEL" >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
