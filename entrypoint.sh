@@ -364,6 +364,27 @@ HS="/opt/hermes/venv/bin/python3 /root/.hermes/scripts/session_handoff.py"
 /opt/hermes/venv/bin/hermes config set quick_commands.pwa.target "Draw with Python viz arsenal:" >/dev/null 2>&1 || echo "   ⚠ failed: quick_commands.pwa.target"
 echo "   ✓ aux vision ($VIS_PROV/$VIS_MODEL) + STT (local turbo) + /pwa alias pins applied"
 
+# ── Context economics (measured 2026-09-18) ──────────────────────────────
+# MEASURED: the compressor resolved a 1,000,000-token context for
+# deepseek-flash (catalog claim), so with compression.threshold=0.35 nothing
+# fired below ~350k tokens. One live session's working set cycled
+# 153k → 336k → 85k → 261k input tokens: every model call shipped 150–260k
+# input (205 calls / 1194 s of model time inside two hours), and the first
+# call of a turn sometimes went cold (cache 14–26%) at 150k+ tokens.
+# threshold_tokens is an ABSOLUTE cap — the minimal lever, same compressor:
+# the working set now cycles 80k → ~16k (target_ratio 0.20).
+# Deliberately NOT model.context_length: that would silently turn the 0.35
+# ratio into a ~45k trigger and hide the intent.
+/opt/hermes/venv/bin/hermes config set compression.threshold_tokens 80000 >/dev/null 2>&1 || echo "   ⚠ failed: compression.threshold_tokens"
+# MEASURED: micro-compaction ran EVERY turn (micro_compact_every_n_turns=1) and
+# cost 9.8–12.0 s per turn (telemetry duration_ms 9825 / 11670 / 12003 / 10421)
+# to shrink the rolling summary by ~1% (11284 → 11140 chars). Its own docstring:
+# "every pass rewrites the prompt prefix and breaks the provider prompt cache" —
+# which is exactly why the first call of a turn showed cache 14–26%.
+# The module default is OFF; this deployment had it ON.
+/opt/hermes/venv/bin/hermes config set compression.micro_compact false >/dev/null 2>&1 || echo "   ⚠ failed: compression.micro_compact"
+echo "   ✓ context: working set capped at 80k tokens; per-turn micro-compaction off"
+
 # ── Thread/resource diagnostics ─────────────────────────────────────────
 echo ""
 echo "┌─────────────────────────────────────────────────────"
