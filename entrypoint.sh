@@ -314,11 +314,39 @@ case "$VIS_PROV" in
   *) echo "   ⚠ VISION_PROVIDER='$VIS_PROV' is not a configured provider — using deepseek"
      VIS_PROV=deepseek; VIS_MODEL="deepseek-flash" ;;
 esac
-echo "→ Pinning auxiliary.vision → $VIS_PROV/$VIS_MODEL + stt → local turbo..."
+echo "→ Pinning auxiliary.vision → $VIS_PROV/$VIS_MODEL + stt (out-of-process, int8)..."
 /opt/hermes/venv/bin/hermes config set auxiliary.vision.provider "$VIS_PROV" >/dev/null 2>&1 || echo "   ⚠ failed: vision.provider"
 /opt/hermes/venv/bin/hermes config set auxiliary.vision.model "$VIS_MODEL" >/dev/null 2>&1 || echo "   ⚠ failed: vision.model"
-/opt/hermes/venv/bin/hermes config set stt.provider local                  >/dev/null 2>&1 || echo "   ⚠ failed: stt.provider"
-/opt/hermes/venv/bin/hermes config set stt.local.model /opt/hermes-models/turbo >/dev/null 2>&1 || echo "   ⚠ failed: stt.local.model"
+
+# ── STT: keep the 1.6 GB whisper load OUT of the gateway process ────────
+# ROOT CAUSE (measured live 2026-09-18): memory.max = 4.66 GiB for this container,
+# the gateway baseline is ~2.2 GiB, and the in-process load of the fp16 turbo model
+# (+1.7 GB) pushes past the ceiling → kernel OOM-kill (memory.events oom_kill 1→2,
+# exit 137; a previous generation also died UNCLEANLY per lifecycle_ledger).
+# FIX: stt.provider=local_command runs scripts/stt_worker.py in a short-lived child
+# (measured: caller peak 59 MB, child peak 1.6 GB, transcript preserved, ru auto-detect).
+# The worker also raises its own oom_score_adj (=+900) so any hit kills the worker,
+# never the gateway (PID 1's oom_score_adj is NOT writable from inside the container).
+# Fallback: if the int8 model or the worker is missing, keep the old in-process pin.
+# stt_worker.py is NOT a "local turbo" pin to be reverted — it is the OOM fix.
+STT_WORKER="/root/.hermes/scripts/stt_worker.py"
+STT_MODEL_INT8="/opt/hermes-models/turbo-int8"
+if [ ! -f "$STT_WORKER" ] && [ -f /root/.hermes/hermes-on-railway/agent-scripts/stt_worker.py ]; then
+  cp /root/.hermes/hermes-on-railway/agent-scripts/stt_worker.py "$STT_WORKER"
+fi
+if [ -f "$STT_WORKER" ] && [ -f "$STT_MODEL_INT8/model.bin" ]; then
+  export HERMES_LOCAL_STT_COMMAND="/opt/hermes/venv/bin/python3 $STT_WORKER {input_path} --model {model} --output_dir {output_dir} --language {language}"
+  /opt/hermes/venv/bin/hermes config set stt.provider local_command >/dev/null 2>&1 || echo "   ⚠ failed: stt.provider"
+  /opt/hermes/venv/bin/hermes config set stt.local.model "$STT_MODEL_INT8" >/dev/null 2>&1 || echo "   ⚠ failed: stt.local.model"
+  /opt/hermes/venv/bin/hermes config set stt.local.device cpu >/dev/null 2>&1
+  /opt/hermes/venv/bin/hermes config set stt.local.compute_type int8 >/dev/null 2>&1
+  /opt/hermes/venv/bin/hermes config set stt.local.unload_after_idle_seconds 300 >/dev/null 2>&1
+  echo "   ✓ STT: out-of-process worker ($STT_MODEL_INT8, int8) — no 1.6 GB load in the gateway"
+else
+  /opt/hermes/venv/bin/hermes config set stt.provider local >/dev/null 2>&1
+  /opt/hermes/venv/bin/hermes config set stt.local.model /opt/hermes-models/turbo >/dev/null 2>&1
+  echo "   ⚠ STT: worker/int8 model missing → falling back to in-process turbo (OOM risk)"
+fi
 
 # Session-handoff protocol (TRIZ resolution of the token-economics problem #1).
 # quick_commands with type=exec run on the host with NO LLM call → zero tokens.

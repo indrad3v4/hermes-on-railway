@@ -57,6 +57,30 @@ RUN mkdir -p /opt/hermes-models && \
         download_model('turbo', output_dir='/opt/hermes-models/turbo')" && \
     ls -la /opt/hermes-models/turbo
 
+# ── STT on this box must NOT load the model inside the gateway ──────────
+# Measured 2026-09-18: the container's cgroup ceiling is 4.66 GiB (memory.max), the
+# gateway baseline is ~2.2 GiB, and loading the 1.6 GB fp16 turbo model INTO the
+# gateway process peaks past the limit → the kernel SIGKILLs the process
+# (memory.events oom_kill incremented, exit 137). Two changes fix the class:
+#   1. an int8 build of the SAME turbo model (814 MB instead of 1.6 GB on disk),
+#      used from a short-lived out-of-process worker (stt.provider=local_command),
+#      so the 1.6 GB peak belongs to a child that exits, not to the gateway;
+#   2. the worker raises its own oom_score_adj, so a hit costs one transcript
+#      instead of a gateway restart.
+RUN /opt/hermes/venv/bin/python -c "from huggingface_hub import snapshot_download; \
+        snapshot_download('Zoont/faster-whisper-large-v3-turbo-int8-ct2', \
+                          local_dir='/opt/hermes-models/turbo-int8', \
+                          allow_patterns=['*.bin','*.json','*.txt'])" && \
+    ls -la /opt/hermes-models/turbo-int8
+
+# The shim that makes Hermes pick the out-of-process provider on its own: a binary named
+# "whisper" on PATH satisfies _find_whisper_binary (tools/transcription_audio.py:41), so
+# stt.provider=local_command resolves WITHOUT relying on an exported HERMES_LOCAL_STT_COMMAND
+# (which only exists in the gateway env after a container start). The wrapper forwards the
+# whisper.cpp CLI contract to scripts/stt_worker.py (faster-whisper, int8, CPU).
+COPY agent-scripts/whisper-shim /usr/local/bin/whisper
+RUN chmod +x /usr/local/bin/whisper && /usr/local/bin/whisper --help | head -3
+
 # ── Node.js + DeepSeek Harness (dsh) — DEFAULT agentic-coding harness ───
 # Indra's decision (2026-09-14): dsh is the default harness for agentic
 # coding. A manual `npm i -g` dies on redeploy — that is exactly how Cline

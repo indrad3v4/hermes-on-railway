@@ -1,0 +1,13 @@
+#!/bin/sh
+# /usr/local/bin/whisper — Hermes local STT shim.
+#
+# Why this file exists: Hermes' local_command provider is auto-detected when a binary
+# named "whisper" is on PATH (tools/transcription_audio.py:41 `_find_whisper_binary`).
+# This shim satisfies that probe and forwards the whisper.cpp-style CLI contract
+#   <input> --model <m> --output_format txt --output_dir <d> --language <l>
+# to the out-of-process faster-whisper worker, so the 1.6 GB model load lands in a
+# short-lived child instead of inside the gateway process (which OOM-kills the
+# container at its 4.66 GiB cgroup ceiling).
+#
+# Installed by the Dockerfile to /usr/local/bin/whisper (see agent-scripts/whisper-shim).
+exec /opt/hermes/venv/bin/python3 /root/.hermes/scripts/stt_worker.py "$@"
