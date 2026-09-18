@@ -1,0 +1,64 @@
+{
+  "patched_module": "/tmp/hlat4/agent/context_compressor.py",
+  "threshold_tokens": 80000,
+  "verdicts": {
+    "REAL 17:33 empty middle": {
+      "skip_llm": true,
+      "reason": "empty_middle",
+      "llm_calls_prevented": 1,
+      "why_this_state": "the one live compression_attempt of 18.09 with middle_window_tokens=0"
+    },
+    "REAL audit NEAR-EXACT (fat tail, big middle)": {
+      "skip_llm": false,
+      "reason": null,
+      "llm_calls_prevented": 0,
+      "why_this_state": "5 telemetry records 18.09: middle 31-45k, reclaim 0"
+    },
+    "SYN reclaim sufficient": {
+      "skip_llm": true,
+      "reason": "reclaim_sufficient",
+      "llm_calls_prevented": 1,
+      "why_this_state": "deterministic passes dropped 25k and the live list is back under 80k"
+    },
+    "SYN reclaim nothing (synthetic current)": {
+      "skip_llm": false,
+      "reason": null,
+      "llm_calls_prevented": 0,
+      "why_this_state": "guard case: high synthetic current, nothing reclaimed -> LLM must run"
+    },
+    "SYN normal path": {
+      "skip_llm": false,
+      "reason": null,
+      "llm_calls_prevented": 0,
+      "why_this_state": "ordinary over-threshold compression"
+    }
+  },
+  "decision_cost": {
+    "iterations": 20000,
+    "total_ms": 341.75,
+    "per_call_us": 17.088
+  },
+  "log_stats": {
+    "available": true,
+    "log": "/root/.hermes/logs/agent.log",
+    "counts": {
+      "attempt": 27,
+      "no_progress": 2,
+      "rearmed": 19,
+      "rearmed_provider_confirmed": 19,
+      "prellm_skip": 0,
+      "feasibility_skip": 0
+    },
+    "latency_samples": 0,
+    "p50_s": null,
+    "p95_s": null,
+    "max_s": null,
+    "total_s": null,
+    "reading": "'rearmed_provider_confirmed' is the engine's own post-hoc equivalent of F1 fast-path B: it re-arms the budget only AFTER a real provider-confirmed recovery. F1 decides the same thing BEFORE paying for the LLM call."
+  },
+  "summary": {
+    "states_measured": 5,
+    "llm_calls_prevented_here": 2,
+    "note": "Counted over the states listed above only — these are the telemetry shapes that exist today (one empty-middle record, five big-middle records) plus the synthetic edge cases required by the task. NOT extrapolated to all 25 compression events."
+  }
+}

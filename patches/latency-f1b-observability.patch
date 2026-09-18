@@ -1,0 +1,150 @@
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -1682,6 +1682,12 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
+             "post_deterministic_tokens": None, "feasibility_skip_reason": None,
+             "feasibility_skip_reasons": None,
+             "deterministic_reclaim_estimate": None,
++            # Observability (D2/D3): the window geometry the attempt actually used, plus the
++            # middle's size BEFORE the handoff scan reclassified it. Recording only — these never
++            # feed a decision, but without them "the window was only handoffs" and "the window was
++            # empty" are indistinguishable in the log, and the quiet-mode log line that does print
++            # the boundaries is suppressed in the gateway (quiet_mode=True).
++            "window_start": None, "window_end": None, "middle_window_pre_scan_tokens": None,
+             "ineffective_compression_count": int(getattr(self, "_ineffective_compression_count", 0) or 0),
+             "aux_prompt_tokens": None, "aux_output_reservation": None, "aux_provider": "", "aux_model": "",
+             "aux_input_tokens": None, "aux_output_tokens": None, "aux_duration_ms": None,
+@@ -4704,6 +4710,10 @@ Write only the summary body. Do not include any preamble or prefix."""
+         n_messages = len(messages)
+         # Phase 2: Determine boundaries
+         compress_start, compress_end = self._compress_window(messages)
++        # Observability (D2): stamp the geometry BEFORE any early return, so a structural no-op
++        # reports the window it actually judged instead of leaving the reader to reconstruct it.
++        telemetry["window_start"] = compress_start
++        telemetry["window_end"] = compress_end
+         if compress_start >= compress_end:
+             self._record_compression_regions(
+                 head_messages=messages[:compress_start], middle_messages=[], tail_messages=messages[compress_end:],
+@@ -4714,6 +4724,11 @@ Write only the summary body. Do not include any preamble or prefix."""
+             )
+             return messages
+         turns_to_summarize = messages[compress_start:compress_end]
++        # Observability (D3): measure the middle BEFORE the handoff scan drops already-summarized
++        # rows. `middle_window_tokens` is stamped only after the scan, so it reads 0 both when the
++        # window was genuinely empty and when it held nothing but handoffs (#59496) — two very
++        # different diagnoses that must not collapse into the same number.
++        telemetry["middle_window_pre_scan_tokens"] = estimate_messages_tokens_rough(turns_to_summarize)
+         # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
+         if getattr(self, "tail_mode", "lean") == "lean":
+             messages = self._demote_stale_tail_tools(messages, compress_end)
+--- a/agent/conversation_compression.py
++++ b/agent/conversation_compression.py
+@@ -1203,7 +1203,15 @@ def _emit_compression_attempt_telemetry(
+         if commit_started_at is not None:
+             telemetry["commit_ms"] = payload["commit_ms"] = max(0, int((time.monotonic() - commit_started_at) * 1000))
+         if failure_class:
+-            payload["failure_class"] = failure_class
++            # D1 (observability): a caller's coarse class ("no_progress") must not erase the
++            # structural class the compressor already stamped (empty_post_handoff_window,
++            # no_compressible_window, insufficient_messages). Keep the inner one authoritative and
++            # park the caller's beside it, so the two diagnoses stay distinguishable in the log.
++            inner_class = payload.get("failure_class")
++            if inner_class and inner_class != failure_class:
++                payload.setdefault("attempt_failure_class", failure_class)
++            else:
++                payload["failure_class"] = failure_class
+         payload.setdefault("chunking", False)
+         payload.setdefault("chunk_count", 0)
+         payload["fallback_used"] = bool(
+--- a/tests/agent/test_compression_attempt_telemetry.py
++++ b/tests/agent/test_compression_attempt_telemetry.py
+@@ -1,9 +1,10 @@
+ import json
+ import logging
++import time
+ from types import SimpleNamespace
+ from unittest.mock import patch
+ 
+-from agent.conversation_compression import compress_context
++from agent.conversation_compression import _emit_compression_attempt_telemetry, compress_context
+ from agent.context_compressor import ContextCompressor
+ 
+ 
+@@ -198,3 +199,61 @@ def test_aux_call_telemetry_records_content_free_phase_timings():
+         "commit_ms": 11,
+     }
+     assert "TOPSECRET_TRANSCRIPT_TEXT" not in json.dumps(payload)
++
++
++def test_inner_failure_class_survives_caller_no_progress(caplog):
++    """D1 (F1 audit): a caller's coarse class must not erase the structural one.
++
++    Production shape (five records, 2026-09-18): the compressor stamps the real diagnosis
++    ('empty_post_handoff_window') in its telemetry, the caller then emits the attempt with
++    failure_class='no_progress'. Before this fix the emitted line said only 'no_progress', and
++    the structural cause had to be reverse-engineered from an unrelated field. Both classes are
++    now readable in the same line; the structural one stays authoritative.
++    """
++    compressor = SimpleNamespace(
++        _last_compression_telemetry={
++            "failure_class": "empty_post_handoff_window",
++            "window_start": 1, "window_end": 2, "middle_window_pre_scan_tokens": 37,
++        },
++        _last_summary_fallback_used=False,
++        _last_aux_model_failure_model=None,
++    )
++    agent = SimpleNamespace(
++        context_compressor=compressor, session_id="session-d1", _compression_attempt_id="attempt-d1",
++    )
++
++    with caplog.at_level(logging.INFO):
++        _emit_compression_attempt_telemetry(
++            agent, started_at=time.monotonic(), commit_status="aborted", split_status="aborted",
++            failure_class="no_progress",
++        )
++
++    payload = _extract_telemetry(caplog)
++    assert payload["failure_class"] == "empty_post_handoff_window"
++    assert payload["attempt_failure_class"] == "no_progress"
++    # F2 fields ride along on the same line, so one log entry answers "which window, how full".
++    assert payload["window_start"] == 1
++    assert payload["window_end"] == 2
++    assert payload["middle_window_pre_scan_tokens"] == 37
++
++
++def test_caller_class_applies_when_none_was_stamped(caplog):
++    """No inner class → the caller's class is the only diagnosis and must be kept as-is."""
++    compressor = SimpleNamespace(
++        _last_compression_telemetry={},
++        _last_summary_fallback_used=False,
++        _last_aux_model_failure_model=None,
++    )
++    agent = SimpleNamespace(
++        context_compressor=compressor, session_id="session-d1b", _compression_attempt_id="attempt-d1b",
++    )
++
++    with caplog.at_level(logging.INFO):
++        _emit_compression_attempt_telemetry(
++            agent, started_at=time.monotonic(), commit_status="aborted", split_status="aborted",
++            failure_class="no_progress",
++        )
++
++    payload = _extract_telemetry(caplog)
++    assert payload["failure_class"] == "no_progress"
++    assert "attempt_failure_class" not in payload
+--- a/tests/agent/test_context_compressor_summary_continuity.py
++++ b/tests/agent/test_context_compressor_summary_continuity.py
+@@ -459,3 +459,14 @@ def test_empty_post_handoff_window_noops_without_summary_call():
+     assert compressor._last_compress_aborted is False
+     telemetry = compressor._last_compression_telemetry or {}
+     assert telemetry.get("failure_class") == "empty_post_handoff_window"
++    # F2 observability (D2/D3): the geometry is now stamped even on a structural no-op, so this
++    # diagnosis is readable from the telemetry alone — the quiet-mode log line that prints the
++    # boundaries never fires in the gateway.
++    window_start, window_end = telemetry.get("window_start"), telemetry.get("window_end")
++    assert isinstance(window_start, int) and isinstance(window_end, int)
++    assert window_start < window_end, "a real, non-empty window was judged"
++    # ...and it held the handoff row BEFORE the scan: `middle_window_tokens` reads 0 only after
++    # _scan_window_handoffs strips the standalone handoff to None. 0 after != nothing before.
++    assert telemetry.get("middle_window_pre_scan_tokens", 0) > 0
++    assert telemetry.get("middle_window_tokens") == 0
++    assert telemetry.get("chunk_count") == 0

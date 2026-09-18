@@ -1,0 +1,493 @@
+================================================================================
+F1 PATCH — CONTROL-FLOW AUDIT OF THE TWO PRE-LLM FAST-PATHS
+================================================================================
+Subject      : /root/.hermes/hermes-on-railway/patches/latency-f1-feasibility-fastpaths.patch (220 lines)
+Ground truth : /opt/hermes/agent/context_compressor.py (4945 lines, UNPATCHED, live)
+Related      : /opt/hermes/agent/context_compressor_summary.py, /opt/hermes/agent/conversation_compression.py,
+               /opt/hermes/agent/model_metadata.py, /opt/hermes/tests/agent/test_context_compressor.py
+Author       : subagent audit, 2026-09-18
+Mode         : READ-ONLY. Nothing under /opt/hermes, git, PR, main, Railway or any live DB was modified.
+               The patch was applied only to a throwaway copy at /tmp/f1audit (git-init'ed scratch tree)
+               to run the tests and probes quoted below.
+Evidence marks
+  EXACT        = proven by a quoted source line and/or a reproduced command/test output in this session
+  NEAR-EXACT   = supported by quoted code plus structural reasoning, not by a direct runtime trace
+  RECONSTRUCTED= reasoned from production telemetry/logs or from unquoted context; treat as a hypothesis
+Headline answers
+  Q1 insertion of fast-path A  -> inside _feasibility_skip, immediately after the middle_tokens resolution,
+                                  i.e. before the (now demoted) heuristic strike gate.
+  Q2 fast-path A reachable?    -> NO. It is a defensive invariant + telemetry label only; zero latency value.
+  Q3 fast-path B measurement   -> on the live `messages` list, after every deterministic mutation; identical
+                                  value to the pre-existing deterministic_reclaim_estimate expression.
+  Q4 reclaim > 0 guard         -> preserves real semantics. Verified both directions empirically.
+  Q5 new telemetry window      -> same LIST as _summarize_window receives, but NOT the text the summarizer
+                                  is actually asked to read (bounded/sampled at context_compressor.py:3312).
+
+================================================================================
+Q1 — WHERE FAST-PATH A IS INSERTED (empty middle, middle_window_tokens == 0)
+================================================================================
+
+The patch adds no new call site. It edits the body of the single existing gate.
+
+Patch hunk (patch file, lines 20-40, hunk header `@@ -4389,... _feasibility_skip @@`), quoted verbatim:
+
+  patch:33  minus `            middle_tokens = telemetry.get("middle_window_tokens")`
+  patch:34  plus  `            middle_tokens = telemetry.get("middle_window_tokens")`
+  patch:35  plus  `        middle_tokens = estimate_messages_tokens_rough(turns_to_summarize) if middle_tokens is None else middle_tokens`
+  patch:36  plus  `+        # Fast-path A (objective): nothing in the middle to summarise.`
+  patch:37  plus  `+        if middle_tokens == 0:`
+  patch:38  plus  `+            return self._record_prellm_skip(`
+  patch:39  plus  `+                telemetry, "empty_middle", middle_tokens, compress_start, compress_end,`
+  patch:40  plus  `+            )`
+
+In the patched tree (/tmp/f1audit/agent/context_compressor.py) that block lands at 4412-4416:
+
+  4409|        middle_tokens = telemetry.get("middle_window_tokens")
+  4410|        middle_tokens = estimate_messages_tokens_rough(turns_to_summarize) if middle_tokens is None else middle_tokens
+  4411|
+  4412|        # Fast-path A (objective): nothing in the middle to summarise.
+  4413|        if middle_tokens == 0:
+  4414|            return self._record_prellm_skip(
+  4415|                telemetry, "empty_middle", middle_tokens, compress_start, compress_end,
+  4416|            )
+
+Live-source context it is inserted into (unpatched numbering):
+
+  4392|    def _feasibility_skip(
+  4393|        self, telemetry: Dict[str, Any], turns_to_summarize: List[Dict[str, Any]],
+  4394|        compress_start: int, compress_end: int,
+  4395|    ) -> bool:
+  4396|        """Pre-LLM skip after a real-usage ineffectiveness strike (reads the counter, never writes)."""
+  4397|        if self._ineffective_compression_count < 1:
+  4398|            return False
+  4399|        # Reuse the telemetry estimate so log and telemetry agree; None means the regions helper
+  4400|        # no-op'd (0 is valid).
+  4401|        middle_tokens = telemetry.get("middle_window_tokens")
+  4402|        middle_tokens = estimate_messages_tokens_rough(turns_to_summarize) if middle_tokens is None else middle_tokens
+  4403|        if middle_tokens >= int(self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION):
+  4404|            return False
+  4405|        self._last_feasibility_skip = True
+  4406|        self._prellm_skip_count += 1
+  4407|        telemetry["prellm_skip_count"] = self._prellm_skip_count
+
+So A is inserted between live 4402 and 4403 — after middle_tokens is resolved, before the heuristic test.
+
+ORDERING CONSEQUENCE (real behaviour change, not just an addition) — EXACT:
+  live 4397-4398 returns False as soon as `_ineffective_compression_count < 1`, i.e. the whole body below it
+  was previously unreachable without a prior real-usage strike. The patch moves that gate to the END of the
+  function (patch:61-62 `+        if self._ineffective_compression_count < 1:` / `+            return False`) and
+  routes the heuristic's own skip through the new `_record_prellm_skip` (patch:65-67). Consequence: A and B
+  are now evaluated on EVERY compression attempt, including the zero-strike case, and a skip can now be taken
+  with no evidence of past ineffectiveness — the outcome is the deterministic fallback summary (live 4695
+  `summary = None`; fallback inserted in Phase 4) instead of an LLM summary. That is the patch's intent, but
+  it is a semantics widening that the patch's own summary ("two fast-paths, then the unchanged heuristic")
+  understates: the heuristic is not merely "unchanged and last", it was demoted past a gate that used to
+  short-circuit everything.
+
+================================================================================
+Q2 — IS FAST-PATH A REACHABLE AT ALL?  => NO.  fastpath_a_reachable = false
+================================================================================
+
+Evidence chain (all lines live file):
+
+1. ONE call site only. `grep -n "_feasibility_skip(" agent/*.py` returns exactly two hits:
+   the definition at 4392 and the call at
+     4694|        feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)
+   The patch does not add a call site (patch:127-131 only extends the argument list with current_tokens).
+   => everything A can ever see comes through live 4694.                                                                [EXACT]
+
+2. Before 4694, two early returns remove precisely the states A tests for:
+     4657|        if compress_start >= compress_end:
+     4658|            self._record_compression_regions(
+     4659|                head_messages=messages[:compress_start], middle_messages=[], tail_messages=messages[compress_end:],
+     4660|            )
+     4661|            self._structural_no_op_result(
+     4662|                telemetry, "no_compressible_window",
+     4663|                f"compress_start ({compress_start}) >= compress_end ({compress_end}) - transcript fits within tail budget",
+     4664|            )
+     4665|            return messages
+     4680|        if not turns_to_summarize:
+     4681|            # Window is only handoff rows (#59496): skip the aux call; _previous_summary is KEPT —
+     4682|            # it came from this transcript.
+     4683|            self._structural_no_op_result(
+     4684|                telemetry, "empty_post_handoff_window",
+     4685|                f"window {compress_start}-{compress_end} holds only already-summarized handoffs",
+     4686|            )
+     4687|            return messages
+   i.e. an empty middle is handled structurally BEFORE the gate, never inside it.                                       [EXACT]
+
+3. The number A tests is derived from the object 4680 already proved non-empty:
+     4666|        turns_to_summarize = messages[compress_start:compress_end]
+     4670|        scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
+     4671|        turns_to_summarize = scan.turns_to_summarize
+     4672|        self._record_compression_regions(
+     4673|            head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
+     4674|        )
+   `middle_window_tokens` is therefore written from the very list handed to the gate at 4694 (as
+   `turns_to_summarize`, same object). And when the regions helper no-ops, the patch's own fallback at
+   patched 4410 recomputes the same list. Either way A's operand is an estimate OF A NON-EMPTY LIST.        [EXACT]
+
+4. Estimator floor: for every non-empty list of message dicts the estimate is >= 1. Reproduced directly in
+   the patched copy:
+     estimate_messages_tokens_rough([{"role": "user", "content": ""}]) -> 8
+     estimate_messages_tokens_rough([{}])                             -> 1
+     estimate_messages_tokens_rough([""])   (non-dict, pathological)  -> 0
+     estimate_messages_tokens_rough([])                               -> 0
+   => middle_tokens == 0 at 4694 requires turns_to_summarize to be a list of non-dict falsy objects, which
+   cannot reach the window: `_compress_window`, `_prune_old_tool_results` and `_demote_stale_tail_tools` all
+   call `.get(...)` on these rows, so a bare "" would raise long before 4694.                                          [EXACT for >=1 on dicts;
+                                                                                                          RECONSTRUCTED for the .get claim]
+
+5. Runtime probe on the patched copy (spy wrapped around ContextCompressor._feasibility_skip):
+     (b) 12-message transcript, non-force  -> _feasibility_skip calls: 1
+         (middle_window_tokens=69, len_turns=7, compress_start=2, compress_end=9, current_tokens=999999)
+     (a) tiny transcript (insufficient_messages branch) -> _feasibility_skip calls: 0
+   Every observed invocation carried a non-zero middle.                                                                 [EXACT]
+
+6. Production telemetry census (`agent.log`, all `context compression attempt telemetry:` lines, 44 total):
+     39 records -> 10 fields, middle_window_tokens absent (telemetry was empty; see Claim 1 below)
+      5 records -> full 37 fields, and ALL FIVE have middle_window_tokens == 0, e.g.
+        2026-09-18 18:46:49,015  prellm=0 head=0 tail=45785 cur=84037 thr=80000 reclaim=0 fc=no_progress status=aborted
+        2026-09-18 18:28:10,024  prellm=0 head=0 tail=46148 cur=84079 thr=80000 reclaim=0 fc=no_progress status=aborted
+        2026-09-18 17:33:24,632  prellm=0 head=0 tail=45832 cur=80927 thr=80000 reclaim=0 fc=no_progress status=aborted
+   Every empty-middle event in real usage is a STRUCTURAL no-op: prellm_skip_count == 0 (the gate never
+   latched), commit_status=aborted, and head=0 (compress_start=0) with the tail left intact. A never fired,
+   and could not have: those attempts never reached 4694.                                                               [EXACT]
+
+7. Which structural branch produced the production signature — NEAR-EXACT:
+   `protected_head_tokens == 0` means compress_start == 0, which is possible because
+     3923|        head = 1 if messages and messages[0].get("role") == "system" else 0
+     3924|        return head + self._effective_protect_first_n(messages)
+   i.e. no system row at index 0 and a `protect_first_n` that has decayed to 0 after earlier compactions
+   (#11996). With compress_start == 0, both 4658 and 4672 record head=[] -> 0 tokens, so the log signature
+   matches either branch. The 4657 branch additionally needs compress_start >= compress_end; by construction
+   `_find_tail_cut_by_tokens` floors the cut at `max(cut_idx, head_end + 1)`, so compress_end >= compress_start + 1,
+   which makes 4657 hard to reach and 4680 (`empty_post_handoff_window`, window holds only already-summarized
+   handoff rows, #59496) the more likely producer of the five records. The distinction does not change Q2's
+   answer — both branches return before 4694.                                     [NEAR-EXACT]
+
+VERDICT on A — EXACT (given the single call site and the estimator floor):
+  Fast-path A is UNREACHABLE as a latency skip. `middle_window_tokens == 0` cannot coexist with a call at 4694
+  while turns_to_summarize is non-empty, and an empty turns_to_summarize has already returned at 4680. A is
+  therefore only (a) a defensive invariant that documents an impossible state, and (b) a telemetry label
+  ("empty_middle") that can never be emitted by production traffic. Latency benefit: zero.
+  Cost / risk: A is not free. If a future refactor ever lets a zero-token middle reach 4694, A converts a
+  STRUCTURAL no-op (transcript returned untouched, previous summary kept, backoff armed — 4661-4665 / 4683-4687)
+  into a "compression succeeded" path: `summary = None` at 4695 means Phase 4 inserts the deterministic
+  fallback placeholder and the middle is dropped, replacing retained detail with a synthetic summary. The
+  structural early returns are the safer behaviour; A's existence invites a regression where the window is
+  genuinely empty but the health signal (structural no-op / backoff) is lost.
+  The tests cannot detect this, because they construct the unreachable state by hand: patch:163-... build a
+  telemetry dict with `middle_window_tokens: 0` and call `_feasibility_skip` DIRECTLY with `turns_to_summarize=[]`.
+  A is reachable only from such direct calls — i.e. from its own unit tests.
+
+================================================================================
+Q3 — WHAT post_deterministic_tokens MEASURES, WHEN, AND WHAT current_tokens IS
+================================================================================
+
+Q3a. Which object — the live `messages` list of compress(), i.e. the WHOLE transcript.      [EXACT]
+  Patch hunk (patch file lines 107-120, anchored at `@@ -4673,9 +4730,14 @@`):
+    patch:110  `        # Shadow telemetry (KROK 0): deterministic reclaim measured over the already-run passes above.`
+    patch:113+ `        _post_deterministic_tokens = estimate_messages_tokens_rough(messages)`
+    patch:114+ `        telemetry["post_deterministic_tokens"] = _post_deterministic_tokens`
+    patch:115  `        telemetry["deterministic_reclaim_estimate"] = max(`
+    patch:116- `            0, _pre_deterministic_tokens - estimate_messages_tokens_rough(messages),`
+    patch:117+ `            0, _pre_deterministic_tokens - _post_deterministic_tokens,`
+    patch:118  `        )`
+    patch:119+ `        telemetry["_pre_deterministic_tokens"] = _pre_deterministic_tokens`
+  Note it is the whole list, NOT the window: the neighbouring `deterministic_reclaim_estimate` (live 4676-4678)
+  is also whole-list, and `_pre_deterministic_tokens` (live 4646) is whole-list. Same domain, so the
+  subtraction is meaningful.                                                                       [EXACT]
+
+Q3b. When relative to the deterministic mutations — AFTER all of them.                        [EXACT]
+  live 4646  `_pre_deterministic_tokens = estimate_messages_tokens_rough(messages)`   <- BEFORE everything
+  live 4648  `messages, pruned_count = self._prune_old_tool_results(...)`             <- mutation 1
+  live 4653  `messages = self._drop_blank_echoes(messages)`                            <- mutation 2
+  live 4656  `compress_start, compress_end = self._compress_window(messages)`
+  live 4669  `messages = self._demote_stale_tail_tools(messages, compress_end)`       <- mutation 3 (lean)
+  live 4670  `scan = self._scan_window_handoffs(...)`                                  <- mutation 4 (self-heal; also
+                                                                                        rewrites turns_to_summarize)
+  live 4672-4674 `_record_compression_regions(...)`
+  patch inserts the measurement immediately after 4674 and immediately before the reclaim expression.
+  The patch also merely HOISTS the identical call that live 4677 already made at that exact point (live 4677
+  called `estimate_messages_tokens_rough(messages)` once); `_post_deterministic_tokens` is therefore the same
+  value the pre-existing telemetry reported. No double measurement, no reordering of the estimator relative
+  to the mutations.                                                                                [EXACT]
+
+Q3c. Any mutation between measurement and the skip decision? — NONE.                            [EXACT]
+  Between the measurement (patched ~4735) and the decision (live 4694 / patched ~4756) the only statements are:
+    the two telemetry writes at patch:114/119/120 (dict writes, do not touch `messages`);
+    live 4679 `telemetry["chunk_count"] = 1 if turns_to_summarize else 0`;
+    live 4680-4687 (early return, no mutation);
+    live 4688-4691 `_log_compression_start(...)` (read-only);
+  and `_summarize_window` (live 4697) runs AFTER the decision. So post_deterministic_tokens still describes
+  the list state at the moment B is evaluated.                                                     [EXACT]
+
+Q3d. Can current_tokens describe a different state? — YES, it always can, by construction.     [EXACT for identity;
+                                                                                     NEAR-EXACT for the enumeration]
+  live 4642 makes the domains explicit:
+    4642|        display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+  `current_tokens` is a REQUEST-level figure (wire prompt accounting: system prompt + tool schemas + provider
+  billing), while `post_deterministic_tokens` is MESSAGE-LIST-only. They are different measurements of
+  different things, and nothing in the patch (or in the live code) reconciles them. B therefore compares a
+  message-only measured size against a request-level number.
+  Caller paths that pass current_tokens (single production funnel: `agent._compress_context`, reached from
+  `compress_fn = agent.context_compressor.compress` bound in conversation_compression.py):
+    1. conversation_compression.py:3406 `approx_tokens=approx_tokens` (auto/pre-flight compression)
+    2. conversation_compression.py:3459 `approx_tokens=approx_tokens` (same helper, second call site)
+    3. turn_context.py:474 `approx_tokens=request_pressure_tokens`
+    4. turn_preflight.py:133 `approx_tokens=request_pressure_tokens`
+    + the branch in conversation_compression.py that sets `approx_tokens = 0` after adopting a grown durable
+      parent — with 0, B's `current_tokens > self.threshold_tokens` is False, so B cannot fire there.
+    + tests: synthetic constants (999_999 and 90_000) in test_context_compressor.py, e.g. the abort tests.
+      999_999 exceeds any threshold and matches no message list — exactly the mismatch the guard protects against.
+  Also note what the patch does NOT do: it passes `current_tokens if isinstance(current_tokens, int) else None`
+  (patch:130), so B never falls back to the stale `self.last_prompt_tokens` that 4642 would use for display.
+  That is the safer choice and is worth keeping.                                                  [EXACT for that reading]
+  Same call site, live 4694, for reference:
+    4694|        feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)
+
+================================================================================
+Q4 — DOES `reclaim > 0` PRESERVE REAL RUNTIME SEMANTICS?  YES
+================================================================================
+
+The guard is patch:54 `+            and isinstance(reclaim, int) and reclaim > 0` inside B's condition
+(patch:49-58). Together with `post_tokens is not None` and `post_tokens <= self.threshold_tokens` it forces
+B to fire ONLY when (i) the caller's request-level number is over threshold, (ii) the live message list is
+measured under threshold, and (iii) the whole-list estimate actually shrank between live 4646 and the
+patched measurement. A synthetic current_tokens alone satisfies only (i).
+
+Empirical, both directions (patched copy /tmp/f1audit, probes written to /tmp/probe_f1.py):
+
+  PROBE 1 — synthetic current_tokens=999_999, tiny 12-message transcript, summarizer raises 401:
+     llm_calls                 = 1
+     messages_preserved        = True (len 12)
+     _last_compress_aborted    = True
+     _last_summary_auth_failure= True
+     telemetry.failure_class   = summary_auth_failure
+     middle_window_tokens      = 69
+     post_deterministic_tokens = 121      threshold = 80000
+     deterministic_reclaim     = 0
+     feasibility_skip_reason   = None
+     prellm_skip_count         = 0
+  => The mismatched current_tokens could NOT produce a skip; the LLM call happened, the 401 was observed,
+     the abort path ran and the messages were preserved.                                                          [EXACT]
+
+  PROBE 2 — same synthetic current_tokens, but a REAL deterministic reclaim (one old 200k-char tool result
+  that _prune_old_tool_results drops):
+     pre_estimate             = 50129
+     llm_calls                = 0
+     feasibility_skip_reason  = reclaim_sufficient
+     telemetry.failure_class  = feasibility_skip      fallback_used = True
+     post_deterministic_tokens= 141
+     deterministic_reclaim    = 49988
+     middle_window_tokens     = 29   (middle NON-empty)
+     out len                  = 8 vs in 10
+  => B is reachable and still does its job; the guard removed the false skip without disabling the true one. [EXACT]
+
+  GUARD NECESSITY (regression reproduction, one-clause ablation on the patched copy only):
+     with    `and isinstance(reclaim, int) and reclaim > 0`  -> pytest -k "TestAuthFailureAborts or
+        TestAbortOnSummaryFailure or TestCooldownReentryAbort or TestF1FeasibilityFastPaths" = 24 passed
+     without that single clause                              -> the 4 named pre-existing tests FAIL
+  The failing set matches the claim in the task context (TestAuthFailureAborts, TestAbortOnSummaryFailure,
+  TestCooldownReentryAbort x2) and demonstrates the guard is load-bearing, not decorative.                      [EXACT]
+
+The historical 401 case, walked:
+  1. summarizer raises a 401 -> the summary layer classifies it as a terminal/auth failure and sets the
+     auth-failure flag (probe: `_last_summary_auth_failure = True`).
+  2. `_abort_on_summary_failure` (live 4700-4703) returns True -> compress() returns `messages` unchanged.
+  3. Without the guard, step 1 never happened: B skipped the LLM, the code fell through to
+     `summary = None` (live 4695), Phase 4 inserted the deterministic fallback summary and the transcript was
+     REPLACED rather than aborted — the session was compacted with a placeholder while the real cause
+     (an invalid/blocked key) went unnoticed, and 4 tests that assert "abort and preserve" broke.               [EXACT]
+
+Residual caveat (does not weaken safety, but makes the guard's narrative softer) — NEAR-EXACT:
+  `reclaim` is `max(0, pre - post)` over the WHOLE list and the span 4646 -> patched measurement contains not
+  only the two "deterministic passes" but also `_drop_blank_echoes` (4653) and `_scan_window_handoffs` (4670,
+  which may mutate/self-heal). So the comment at patch:43-44 ("reclaim > 0 = the passes actually dropped
+  something") is not strictly what the number proves: it proves something in that span shrank the estimate.
+  Safety is nevertheless preserved, because the DECISION rests on the measured post (a fact about the live
+  list) plus the measured reclaim, not on the caller's number. A caller-supplied number can never, by itself,
+  satisfy B.                                                                                     [NEAR-EXACT]
+
+================================================================================
+Q5 — DOES THE NEW TELEMETRY MEASURE THE SAME WINDOW THE COMPRESSOR USES?
+================================================================================
+
+At the LIST level: YES.                                                                          [EXACT]
+  live 4672-4674 records `middle_messages=turns_to_summarize`; live 4697-4698 passes the same variable to
+  `_summarize_window`, and context_compressor_summary.py:43 forwards that same object:
+     43|            return self._generate_summary(turns_to_summarize, **summary_kwargs)
+  Nothing rebinds `turns_to_summarize` between 4674 and 4697 (the intervening statements are telemetry writes,
+  the 4680 early return, and the read-only log at 4688-4691). So `middle_window_tokens` describes exactly the
+  list handed into the summarizer.                                                                 [EXACT]
+
+At the PROMPT level: NO — and this is the flag worth carrying.                                    [EXACT]
+  `_generate_summary` does not send the window; it sends a BOUNDED, possibly SAMPLED serialization of it:
+     3283|    def _generate_summary(
+     3304|        summary_budget = self._compute_summary_budget(turns_to_summarize)
+     3310|        # Lean mode even-samples oversized input (one bounded request, never a second).
+     3311|        bound = self._sample_summary_input if getattr(self, "tail_mode", "lean") == "lean" else self._bound_summary_input
+     3312|        content_to_summarize = bound(self._serialize_for_summary(turns_to_summarize))
+     3316|        prompt = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
+  So `middle_window_tokens` is the input window, while the text actually placed in front of the model is
+  `content_to_summarize` — smaller, and in lean mode an even-sampled subset. Anyone reading
+  middle_window_tokens as "what the summarizer saw" will overstate the prompt, in the very cases (oversized
+  windows) where the distinction matters most. The honest companions are the aux-layer prompt numbers
+  (e.g. aux_prompt_tokens), not this field.
+  Divergence points to flag explicitly:
+   (a) live 4679 `telemetry["chunk_count"] = 1 if turns_to_summarize else 0` — hardcoded 1, so if the summary
+       layer ever issues more than one request, telemetry still reports 1 and `chunking` stays False
+       (defaulted at conversation_compression.py:1207). Pre-existing, not patch-introduced, but the patch's
+       new fields sit in the same record and inherit the "one number, one meaning" risk.                        [EXACT]
+   (b) when the regions helper no-ops, telemetry has no `middle_window_tokens` and the code silently
+       recomputes at patched 4410 — acknowledged in the comment at live 4399-4400. A skip logged with reason
+       `empty_middle`/`small_middle` can therefore carry a middle_tokens value that is NOT in telemetry, so
+       the warning line and the JSON record can disagree. (Unreachable in practice for the same reason as A.)   [EXACT]
+   (c) the patch's own comment, patch:42-43, claims "The numbers are facts, not estimates". True for
+       `post_deterministic_tokens` (recomputed from the live list). Not true for the number B compares it
+       against: `current_tokens` is unverified request-level accounting and `threshold_tokens` is config-
+       derived. The log line at patch:97-102 prints them together as if they were one measurement domain.       [EXACT]
+
+================================================================================
+APPENDIX A — THE FOUR OUT-OF-BAND HYPOTHESES, TESTED (attempt to refute, not confirm)
+================================================================================
+
+Claim 1 — "the 37-field record is written only when _last_compression_telemetry holds a dict; the 17:33:20
+record exists because telemetry was empty."
+  VERDICT: CONFIRMED IN SUBSTANCE, but the field count in the hypothesis is wrong: the record has 10 fields,
+  not 13. Mechanism, quoted:
+     1192|        telemetry = getattr(compressor, "_last_compression_telemetry", None)
+     1193|        if not isinstance(telemetry, dict):
+     1194|            telemetry = {}
+     1195|        payload = dict(telemetry)
+     1196|        payload.setdefault("event", "compression_attempt")
+     1197|        payload.setdefault("attempt_id", getattr(agent, "_compression_attempt_id", "") or uuid.uuid4().hex)
+     1198|        payload.setdefault("session_id", getattr(agent, "session_id", "") or "")
+     1199|        payload.update(
+     1200|            total_duration_ms=int((time.monotonic() - started_at) * 1000), commit_status=commit_status,
+     1201|            split_status=split_status,
+     1202|        )
+     1203|        if commit_started_at is not None:
+     1204|            telemetry["commit_ms"] = payload["commit_ms"] = max(0, int((time.monotonic() - commit_started_at) * 1000))
+     1205|        if failure_class:
+     1206|            payload["failure_class"] = failure_class
+     1207|        payload.setdefault("chunking", False)
+     1208|        payload.setdefault("chunk_count", 0)
+  With telemetry == {} the payload is exactly: event, attempt_id, session_id, total_duration_ms,
+  commit_status, split_status, commit_ms, failure_class, chunking, chunk_count (fallback_used only if
+  something set it) — i.e. 9-11 keys, matching the observed 10. Census over all 44 telemetry lines in
+  agent.log: 39 x 10 fields, 5 x 37 fields. The 17:33:20,134 record is one of the 39 ten-field ones:
+    {"attempt_id": "08429a9aa1fa4270be29c47d8e25181a", "chunk_count": 0, "chunking": false, "commit_ms": 54,
+     "commit_status": "committed", "event": "compression_attempt", "fallback_used": false,
+     "session_id": "20260918_122501_efcba6e6", "split_status": "in_place_committed", "total_duration_ms": 49027}
+  i.e. no middle_window_tokens, no effective_threshold, no failure_class — the compressor's telemetry dict was
+  empty at emission time. The 5 full records all belong to attempts whose compressor had a populated telemetry
+  dict from _begin_compression_telemetry (live 1664+) and _record_compression_regions (live 1694+).     [EXACT]
+
+Claim 1b (found while checking Claim 1 — deployment-relevant, not asked):
+  The patch is STACKED ON UNCOMMITTED LOCAL WORK. In /opt/hermes's working tree the file is already modified
+  relative to HEAD (`git diff --stat`: 1 file, +35/-3) by a "Shadow telemetry (KROK 0)" change that adds
+  `_pre_deterministic_tokens`, `deterministic_reclaim_estimate`, aux_input/output token fields, and lowers
+  _SUMMARY_TOKENS_CEILING/_LEAN_SESSION_LOG_BUDGET_TOKENS. Verified against HEAD (9e0dc431):
+      git show HEAD:agent/context_compressor.py | grep -c _pre_deterministic_tokens        -> 0
+      git show HEAD:agent/context_compressor.py | grep -c deterministic_reclaim_estimate   -> 0
+      git show HEAD:agent/context_compressor.py | grep -c middle_window_tokens             -> 3
+  The F1 patch's hunks touch exactly those uncommitted lines (patch:110-118 reference `_pre_deterministic_tokens`
+  and `deterministic_reclaim_estimate`), so the patch applies to the WORKING TREE but will NOT apply to a clean
+  checkout of 9e0dc431. Whoever lands F1 must first land (or fold in) the shadow-telemetry change.           [EXACT]
+  Also verified in the same pass: the live working tree contains 0 occurrences of "Fast-path A" and 0 of
+  "_post_deterministic_tokens" — the live source is genuinely unpatched, so every line number quoted in this
+  audit is a valid live-source reference.                                                                    [EXACT]
+
+Claim 2 — "failure_class=no_progress is stamped at conversation_compression.py:3180 and is therefore a
+STRUCTURAL no-op, not an LLM failure."
+  VERDICT: CONFIRMED, and stronger than stated — the emitted class OVERWRITES the compressor's own internal
+  class. Quoted:
+     3167|    if compressed == messages_before_compression or (
+     3168|        _strip_marker_for_comparison(compressed) == _strip_marker_for_comparison(messages_before_compression)
+     3169|    ):
+     3170|        if messages != messages_before_compression:
+     3171|            messages[:] = copy.deepcopy(messages_before_compression)
+     3172|        logger.info(
+     3173|            "Compression made no progress (session=%s) — skipping boundary rewrite.", agent.session_id or "none"
+     3174|        )
+     3175|        # Unchanged output would fail identically next turn; arm structural backoff so
+     3176|        # auto-compress stops re-firing each turn (success lifts it, force overrides).
+     3177|        with _swallow('no-progress backoff arm failed', exc_info=True):
+     3178|            if callable(_recorder := getattr(agent.context_compressor, "_record_structural_no_op", None)):
+     3179|                _recorder("compaction returned the transcript unchanged (no_progress)")
+     3180|        _emit_aborted_attempt_telemetry(agent, attempt_started_at, "no_progress")
+     3181|        return True
+  It is an identity/content comparison of the compressor's output against its input — no LLM verdict is
+  involved. And because 1205-1206 does `payload["failure_class"] = failure_class` (plain assignment, not
+  setdefault), the outer "no_progress" REPLACES whatever the compressor recorded internally
+  (`no_compressible_window` at 4662, `empty_post_handoff_window` at 4684, or `insufficient_messages` at 4639).
+  Telemetry-fidelity flag: the five production records with middle_window_tokens=0 all read
+  failure_class=no_progress, so the log cannot tell you WHICH structural branch fired. If branch attribution
+  matters operationally, the emitted record needs the inner class preserved (e.g. under a separate key).   [EXACT]
+
+Claim 3 — "the empty middle is not an off-by-one: _find_tail_cut_by_tokens ends in _align_boundary_backward,
+which can return head_end so compress_start >= compress_end, deliberately handled by the early return at 4657
+tagged no_compressible_window."
+  VERDICT: PARTIALLY REFUTED. `_align_boundary_backward` does exist (live 3926) and is used at the end of
+  `_find_tail_cut_by_tokens`, but the function's FINAL statement re-lifts the cut with a hard floor
+  (`max(cut_idx, head_end + 1)`), and then `min(n, _align_boundary_forward(...))`; `_align_boundary_forward`
+  only moves forward. So compress_end >= compress_start + 1 normally, which makes the 4657 branch
+  (`compress_start >= compress_end`) hard to reach — it needs compress_start == n, i.e. the whole transcript
+  inside the protected head, which the guard at 4636-4640 (`n_messages <= _protect_head_size(messages) + 4`)
+  already excludes. Conclusion: the real-world empty middle in the observed telemetry is far more consistent
+  with the 4680 branch (`empty_post_handoff_window`, empty after `_scan_window_handoffs`) with compress_start
+  == 0, than with 4657. Both branches nonetheless return before 4694, so the operational consequence for the
+  patch is unchanged. Aligns with the user's own alternative reading.  [NEAR-EXACT — structural, not traced]
+
+Claim 4 — "fast-path A is unreachable as a latency skip because 4657 and 4680 return earlier and
+middle_window_tokens at 4672 is computed from turns_to_summarize, empty on that branch. If true, A is only a
+defensive invariant/telemetry. Look for a counterexample where _feasibility_skip is called with
+middle_window_tokens == 0 while start < end (e.g. does estimate_messages_tokens_rough return 0 for a
+non-empty list?)."
+  VERDICT: CONFIRMED. No counterexample exists on any real path.
+   - Non-empty list of dicts => estimate >= 1 (measured: [{'role':'user','content':''}] -> 8, [{}] -> 1).
+   - The only measured zero for a non-empty list is a non-dict falsy element (`[''] -> 0`), which cannot
+     survive `_compress_window` / `_prune_old_tool_results` / `_demote_stale_tail_tools` (all call .get).
+   - The gate has exactly one runtime call site (4694) and both structural early returns (4657, 4680) precede it.
+   - Every production occurrence of middle_window_tokens == 0 (5 of 44 records) has prellm_skip_count == 0,
+     i.e. the gate never even latched; all are structural no-ops with commit_status=aborted.
+   - A is reachable ONLY from direct calls that hand-build telemetry (the patch's own unit tests, which pass
+     `middle_window_tokens: 0` with `turns_to_summarize=[]`).
+  So: A = defensive invariant + (permanently unemitted) telemetry label. No latency effect whatsoever; the
+  patch's measured latency win, if any, can only come from fast-path B.                      [EXACT]
+
+================================================================================
+APPENDIX B — VERIFICATION ARTEFACTS (how to re-run)
+================================================================================
+  Scratch tree (patched copy, disposable):      /tmp/f1audit            (patch applied with `git apply -v`)
+  Probes:                                        /tmp/probe_f1.py, /tmp/probe_f1_b.py
+  Interpreter:                                   /opt/hermes/venv/bin/python
+  Tests (patched):                               cd /tmp/f1audit && /opt/hermes/venv/bin/python -m pytest \
+                                                   tests/agent/test_context_compressor.py -k "TestAuthFailureAborts \
+                                                   or TestAbortOnSummaryFailure or TestCooldownReentryAbort \
+                                                   or TestF1FeasibilityFastPaths" -q   -> 24 passed
+  Tests (single-clause ablation, guard removed):  same command, -k "...TestAuthFailureAborts or
+                                                   TestAbortOnSummaryFailure or TestCooldownReentryAbort" -> 4 failed
+  Production telemetry census:                   parse /root/.hermes/logs/agent.log lines matching
+                                                   'compression attempt telemetry: {'
+  Nothing under /opt/hermes, /root/.hermes/hermes-on-railway (beyond reading the patch), git, PR, main,
+  Railway or any live DB was written to.
+
+================================================================================
+SCORECARD
+================================================================================
+  Q1  insertion point                      EXACT
+  Q2  fast-path A reachable                NO — EXACT (single call site + estimator floor + probes + prod telemetry)
+  Q3a measurement object                   EXACT
+  Q3b ordering vs mutations                EXACT
+  Q3c no mutation before decision          EXACT
+  Q3d current_tokens can differ            EXACT (identity) / NEAR-EXACT (caller enumeration)
+  Q4  reclaim > 0 guard preserves semantics EXACT (both directions + ablation reproduction)
+      residual: reclaim can also reflect the blank-echo/handoff-scan span   NEAR-EXACT
+  Q5  telemetry window vs summarizer window EXACT at list level; EXACT divergence at prompt level (3312)
+  Claim 1 (10-field records when telemetry empty)  EXACT (count corrected: 10, not 13)
+  Claim 2 (no_progress is structural, and masks the inner class)  EXACT
+  Claim 3 (4657 via _align_boundary_backward)     NEAR-EXACT / PARTIALLY REFUTED (floor at the end)
+  Claim 4 (A unreachable, no counterexample)      EXACT

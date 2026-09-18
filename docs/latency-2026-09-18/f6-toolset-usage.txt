@@ -1,0 +1,293 @@
+TOOLSET USAGE AUDIT — Hermes box (Railway container)
+Generated: 2026-09-18 18:20 UTC | Host: 8a4cb12c857e (Linux 6.18.5+deb13-cloud-amd64) | Read-only audit: no config/code changed, no restart.
+NOTE: counts are a snapshot of a LIVE database — the gateway keeps writing to state.db while
+this audit ran, so a re-run minutes later returns slightly higher totals. Ratios are stable.
+========================================================================
+
+1. DATA SOURCES (exact names, verified by PRAGMA table_info)
+------------------------------------------------------------------------
+DB file : /root/.hermes/state.db (SQLite, 1.29 GB)  [opened read-only: file:...?mode=ro]
+Table   : messages          (255,343 rows)
+  columns used: tool_calls (TEXT, JSON array of assistant requests)
+                tool_name  (TEXT, name on tool-RESULT rows)
+                timestamp  (REAL, unix epoch UTC)
+  Source A  = parse messages.tool_calls JSON -> function.name  = 118,923 calls
+  Source B  = count messages rows WHERE tool_name<>''         = 118,871 rows
+Table   : sessions          (255 rows)
+  columns: tool_names (JSON list, 18 non-empty), tool_call_count
+  -> sessions.tool_names = list of tools EXPOSED to the model, NOT usage. Not a usage source.
+Table   : session_model_usage (680 rows) — checked and REJECTED as a tool source:
+  its columns are session_id/model/billing_*/task/api_call_count/tokens/cost. No tool column.
+Toolset->tool mapping source: /opt/hermes/toolsets.py :: TOOLSETS + resolve_toolset()
+  (resolved with the working interpreter /opt/hermes/venv/bin/python3).
+Configured toolsets (21) read from /root/.hermes/config.yaml :: platform_toolsets.telegram
+
+WINDOW — IMPORTANT CAVEAT
+------------------------------------------------------------------------
+Requested window : 2026-08-19 18:15 -> 2026-09-18 18:15 UTC (30 days)
+Actual coverage  : 2026-09-09 13:24 -> 2026-09-18 18:17 UTC
+                   = 9.2 days, NOT 30. The state.db contains no messages older than
+                   2026-09-09 13:24 UTC (config sessions.retention_days=30, so the gap is
+                   not retention pruning of an intact history — older rows are simply absent
+                   from this DB file).
+  => Every count below is a 9.2-day count, NOT a 30-day count. All rows present DO fall
+     inside the 30-day window, so nothing in-window was dropped.
+Cross-check: /root/.hermes/logs/agent.log covers ONLY 2026-09-18 (951 lines, one gateway
+  lifecycle). It corroborates that day only; it is not a 30-day evidence source.
+
+2. USAGE BY TOOLSET (21 configured toolsets)
+------------------------------------------------------------------------
+toolset          tools   calls  last used (UTC)  verdict
+------------------------------------------------------------------------
+browser             13    2945  2026-09-18 16:05 
+clarify              1     518  2026-09-18 17:53 
+code_execution       1   20627  2026-09-18 17:59 
+computer_use         1       0  —                
+connections          0       0  —                
+context_engine       0       0  —                
+cronjob              1     283  2026-09-18 14:18 
+delegation           1     789  2026-09-18 18:14 
+file                 4   19217  2026-09-18 18:17 
+hermes-telegram     53     209  2026-09-17 15:58 
+image_gen            1      25  2026-09-16 17:00 
+memory               1     458  2026-09-18 14:10 
+session_search       1      11  2026-09-14 08:38 
+skills               3    4817  2026-09-18 18:17 
+terminal             2   55358  2026-09-18 18:17 
+todo                 1       1  2026-09-14 22:36 
+tts                  1     115  2026-09-18 14:10 
+video                1      89  2026-09-17 19:38 
+video_gen            3       0  —                
+vision               1    9422  2026-09-18 18:17 
+web                  2    3267  2026-09-18 17:50 
+------------------------------------------------------------------------
+(hermes-telegram row counts only bundle-exclusive tools: kanban_*, ha_*, process_manage,
+ cronjob_manage, image_generate, todo_list, session_search, tool_* etc., so tools that
+ belong to a dedicated toolset are not double counted.)
+
+DETAIL PER TOOLSET
+------------------------------------------------------------------------
+
+[browser]  tools=13 used=1 calls=2945 last=2026-09-18 16:05
+    browser_exec                               A=2945    B=2945    last=2026-09-18 16:05
+    browser_back                               A=0       B=0       last=never
+    browser_cdp                                A=0       B=0       last=never
+    browser_click                              A=0       B=0       last=never
+    browser_console                            A=0       B=0       last=never
+    browser_dialog                             A=0       B=0       last=never
+    browser_get_images                         A=0       B=0       last=never
+    browser_navigate                           A=0       B=0       last=never
+    browser_press                              A=0       B=0       last=never
+    browser_scroll                             A=0       B=0       last=never
+    browser_snapshot                           A=0       B=0       last=never
+    browser_type                               A=0       B=0       last=never
+    browser_vision                             A=0       B=0       last=never
+    VERDICT: KEEP (active this week)
+
+[clarify]  tools=1 used=1 calls=518 last=2026-09-18 17:53
+    clarify                                    A=518     B=516     last=2026-09-18 17:53
+    VERDICT: KEEP (active this week)
+
+[code_execution]  tools=1 used=1 calls=20627 last=2026-09-18 17:59
+    execute_code                               A=20627   B=20626   last=2026-09-18 17:59
+    VERDICT: KEEP (active this week)
+
+[computer_use]  tools=1 used=0 calls=0 last=—
+    computer_use                               A=0       B=0       last=never
+    VERDICT: PARK (zero calls in window)
+
+[connections]  tools=0 used=0 calls=0 last=—
+    VERDICT: INVESTIGATE (toolset resolves to 0 tools)
+
+[context_engine]  tools=0 used=0 calls=0 last=—
+    VERDICT: INVESTIGATE (toolset resolves to 0 tools)
+
+[cronjob]  tools=1 used=1 calls=283 last=2026-09-18 14:18
+    cronjob_manage                             A=0       B=283     last=2026-09-18 14:18
+    VERDICT: KEEP (active this week)
+
+[delegation]  tools=1 used=1 calls=789 last=2026-09-18 18:14
+    delegate_task                              A=789     B=789     last=2026-09-18 18:14
+    VERDICT: KEEP (active this week)
+
+[file]  tools=4 used=4 calls=19217 last=2026-09-18 18:17
+    write_file                                 A=9407    B=9407    last=2026-09-18 18:17
+    read_file                                  A=4362    B=4362    last=2026-09-18 18:17
+    patch                                      A=3916    B=3916    last=2026-09-18 18:14
+    search_files                               A=1532    B=1532    last=2026-09-18 16:07
+    VERDICT: KEEP (active this week)
+
+[hermes-telegram]  tools=53 used=8 calls=209 last=2026-09-17 15:58
+    kanban_show                                A=122     B=122     last=2026-09-17 15:58
+    kanban_comment                             A=35      B=35      last=2026-09-17 15:58
+    kanban_block                               A=19      B=19      last=2026-09-17 15:58
+    kanban_complete                            A=15      B=15      last=2026-09-17 15:54
+    kanban_attachments                         A=9       B=9       last=2026-09-17 15:58
+    kanban_attach                              A=7       B=7       last=2026-09-17 15:58
+    kanban_create                              A=1       B=1       last=2026-09-11 12:34
+    kanban_link                                A=1       B=1       last=2026-09-11 12:35
+    ha_call_service                            A=0       B=0       last=never
+    ha_get_state                               A=0       B=0       last=never
+    ha_list_entities                           A=0       B=0       last=never
+    ha_list_services                           A=0       B=0       last=never
+    kanban_attach_url                          A=0       B=0       last=never
+    kanban_heartbeat                           A=0       B=0       last=never
+    kanban_list                                A=0       B=0       last=never
+    kanban_request_changes                     A=0       B=0       last=never
+    kanban_request_review                      A=0       B=0       last=never
+    kanban_unblock                             A=0       B=0       last=never
+    VERDICT: KEEP (active this week)
+
+[image_gen]  tools=1 used=1 calls=25 last=2026-09-16 17:00
+    image_generate                             A=0       B=25      last=2026-09-16 17:00
+    VERDICT: KEEP (active this week)
+
+[memory]  tools=1 used=1 calls=458 last=2026-09-18 14:10
+    memory                                     A=458     B=458     last=2026-09-18 14:10
+    VERDICT: KEEP (active this week)
+
+[session_search]  tools=1 used=1 calls=11 last=2026-09-14 08:38
+    session_search                             A=11      B=192     last=2026-09-14 08:38
+    VERDICT: KEEP (active this week)
+
+[skills]  tools=3 used=3 calls=4817 last=2026-09-18 18:17
+    skill_view                                 A=2679    B=2679    last=2026-09-18 17:55
+    skill_manage                               A=2127    B=2127    last=2026-09-18 18:17
+    skills_list                                A=11      B=11      last=2026-09-12 17:45
+    VERDICT: KEEP (active this week)
+
+[terminal]  tools=2 used=2 calls=55358 last=2026-09-18 18:17
+    terminal                                   A=55357   B=55334   last=2026-09-18 18:17
+    process_manage                             A=1       B=373     last=2026-09-09 23:58
+    VERDICT: KEEP (active this week)
+
+[todo]  tools=1 used=1 calls=1 last=2026-09-14 22:36
+    todo_list                                  A=1       B=0       last=2026-09-14 22:36
+    VERDICT: PARK (near-zero: <=3 calls)
+
+[tts]  tools=1 used=1 calls=115 last=2026-09-18 14:10
+    text_to_speech                             A=115     B=115     last=2026-09-18 14:10
+    VERDICT: KEEP (active this week)
+
+[video]  tools=1 used=1 calls=89 last=2026-09-17 19:38
+    video_analyze                              A=0       B=89      last=2026-09-17 19:38
+    VERDICT: KEEP (active this week)
+
+[video_gen]  tools=3 used=0 calls=0 last=—
+    video_generate                             A=0       B=0       last=never
+    xai_video_edit                             A=0       B=0       last=never
+    xai_video_extend                           A=0       B=0       last=never
+    VERDICT: PARK (zero calls in window)
+
+[vision]  tools=1 used=1 calls=9422 last=2026-09-18 18:17
+    vision_analyze                             A=9422    B=9420    last=2026-09-18 18:17
+    VERDICT: KEEP (active this week)
+
+[web]  tools=2 used=2 calls=3267 last=2026-09-18 17:50
+    web_search                                 A=2452    B=2452    last=2026-09-18 17:50
+    web_extract                                A=815     B=815     last=2026-09-18 17:49
+    VERDICT: KEEP (active this week)
+
+3. TOOLS WITH ZERO CALLS IN WINDOW
+------------------------------------------------------------------------
+26 of 57 distinct configured tools never called:
+   - browser_back
+   - browser_cdp
+   - browser_click
+   - browser_console
+   - browser_dialog
+   - browser_get_images
+   - browser_navigate
+   - browser_press
+   - browser_scroll
+   - browser_snapshot
+   - browser_type
+   - browser_vision
+   - computer_use
+   - ha_call_service
+   - ha_get_state
+   - ha_list_entities
+   - ha_list_services
+   - kanban_attach_url
+   - kanban_heartbeat
+   - kanban_list
+   - kanban_request_changes
+   - kanban_request_review
+   - kanban_unblock
+   - video_generate
+   - xai_video_edit
+   - xai_video_extend
+
+4. OBSERVED ACTIVITY NOT COVERED BY THE 21 CONFIGURED TOOLSETS
+------------------------------------------------------------------------
+Tool names seen in messages but belonging to NO configured toolset:
+   mcp__tg_business_bridge__list_chats          A=0      B=8      last=2026-09-12 11:12
+   mcp__tg_business_bridge__search_messages     A=0      B=29     last=2026-09-13 20:15
+   read                                         A=3      B=0      last=2026-09-14 23:03
+   shell                                        A=7      B=0      last=2026-09-14 22:40
+   tool_call                                    A=1004   B=5      last=2026-09-18 14:18
+   tool_describe                                A=155    B=155    last=2026-09-18 14:10
+   tool_search                                  A=44     B=44     last=2026-09-17 19:38
+  kanban_* tools come in through the hermes-telegram bundle (not a separate configured
+  toolset) — counted above under hermes-telegram.
+
+5. WHAT REMAINS UNKNOWN (stated plainly, not guessed)
+------------------------------------------------------------------------
+- 30-day totals: NOT MEASURABLE. Only 9.2 days of message rows exist. Whether the box
+  was idle 2026-08-19..09-08 or the rows were lost/rotated is NOT determinable from
+  state.db alone. Do not read these numbers as a 30-day profile.
+- 'connections' and 'context_engine' resolve to ZERO tools via the static TOOLSETS table.
+  The registry/plugin layer (which could register manage_connections into 'connections')
+  is NOT loaded in a bare import; sessions.tool_names does show 'manage_connections'
+  exposed in 1 session. So the toolset's real tool list and usage are UNKNOWN here.
+- Per-toolset attribution for tools shared between a dedicated toolset and the
+  hermes-telegram bundle (vision_analyze, memory, session_search, todo_list,
+  cronjob_manage, image_generate, web_*) depends on which toolset the gateway actually
+  enabled; the DB records only the tool NAME, never the owning toolset. Assignments here
+  follow toolsets.py, which is the closest verifiable evidence.
+- Deferred-tool mechanics: the assistant records name 'tool_call' (A=1004) while the result
+  row carries the REAL tool name (cronjob_manage, image_generate, video_analyze, mcp__*).
+  This is why A and B disagree for those names. True invocation counts for deferred tools
+  are closer to the B column. Exact delineation is UNKNOWN without the dispatcher logs.
+- agent.log/errors.log are single-day (2026-09-18) — cannot corroborate older days.
+- Calls originating from cron/subagent sessions are included only insofar as their messages
+  landed in this state.db; async_delegations has 40 rows but no per-tool breakdown.
+
+6. RECOMMENDATIONS (keep / park / investigate)
+------------------------------------------------------------------------
+toolset            calls  tools used  verdict
+browser             2945        1/13  KEEP (active this week)
+clarify              518         1/1  KEEP (active this week)
+code_execution     20627         1/1  KEEP (active this week)
+computer_use           0         0/1  PARK (zero calls in window)
+connections            0         0/0  INVESTIGATE (toolset resolves to 0 tools)
+context_engine         0         0/0  INVESTIGATE (toolset resolves to 0 tools)
+cronjob              283         1/1  KEEP (active this week)
+delegation           789         1/1  KEEP (active this week)
+file               19217         4/4  KEEP (active this week)
+hermes-telegram      209        8/53  KEEP (active this week)
+image_gen             25         1/1  KEEP (active this week)
+memory               458         1/1  KEEP (active this week)
+session_search        11         1/1  KEEP (active this week)
+skills              4817         3/3  KEEP (active this week)
+terminal           55358         2/2  KEEP (active this week)
+todo                   1         1/1  PARK (near-zero: <=3 calls)
+tts                  115         1/1  KEEP (active this week)
+video                 89         1/1  KEEP (active this week)
+video_gen              0         0/3  PARK (zero calls in window)
+vision              9422         1/1  KEEP (active this week)
+web                 3267         2/2  KEEP (active this week)
+
+Summary of verdicts:
+  KEEP        (16): browser, clarify, code_execution, cronjob, delegation, file, hermes-telegram, image_gen, memory, session_search, skills, terminal, tts, video, vision, web
+  PARK        (3): computer_use, todo, video_gen
+  INVESTIGATE (2): connections, context_engine
+
+Top 5 tools by calls (A column, whole available window):
+   terminal                   55357
+   execute_code               20627
+   vision_analyze              9422
+   write_file                  9407
+   read_file                   4362
+
+END OF REPORT

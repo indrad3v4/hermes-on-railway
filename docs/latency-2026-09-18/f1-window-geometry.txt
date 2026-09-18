@@ -1,0 +1,345 @@
+====================================================================================================
+F1 EVIDENCE REPORT - REAL WINDOW GEOMETRY FOR event=compression_attempt TELEMETRY
+====================================================================================================
+Box: Hermes gateway (Railway container). Live code: /opt/hermes (upstream 9e0dc431 + earlier patches).
+Generated 2026-09-18. Investigation was READ-ONLY: no code/config/DB/log/git was modified.
+
+0. SOURCES, QUERIES, AND WHAT 'EXACT' MEANS
+----------------------------------------------------------------------------------------------------
+S1 /root/.hermes/logs/agent.log                 telemetry JSON embedded in the message body of each line
+S2 /opt/hermes/agent/context_compressor.py      live boundary code AND the geometry values
+S3 /opt/hermes/agent/conversation_compression.py live emitter of the log record + the no-progress stamp
+S4 /opt/hermes/agent/agent_init.py              config keys -> ContextCompressor ctor args
+S5 /root/.hermes/config.yaml                    compression.* keys
+S6 /opt/hermes/gateway/run_turn.py              gateway agent construction (quiet_mode)
+Q1 grep -c 'compression_attempt' S1
+Q2 json.loads() every S1 line; keep objects with event=='compression_attempt'  -> 45 records
+Q3 key filter: 'protected_head_tokens' in obj                                  -> 5 records
+Q4 per-record backward scan for 'context compression started' (n_messages, caller estimate)
+Q5 per-record forward scan for 'API call ... in=<prompt tokens>'
+Labels: EXACT = copied verbatim from the cited line. NEAR-EXACT = arithmetic on verbatim values or
+code-derived identity. RECONSTRUCTED = forced by stated code preconditions, not directly recorded.
+
+RECORD SET (Q1/Q2/Q3)
+----------------------------------------------------------------------------------------------------
+45 records with event=='compression_attempt' exist in S1; only 5 carry the geometry keys (per Q3):
+   line   161  2026-09-18 17:33:24,632  session=20260918_122501_efcba6e6  attempt_id=c25391b551d54d1daca8b07eb826d043
+   line  1205  2026-09-18 18:23:14,164  session=20260918_122501_efcba6e6  attempt_id=05e2ceead4b148c48c34fcc85606ccd9
+   line  1401  2026-09-18 18:27:12,244  session=20260918_122501_efcba6e6  attempt_id=382b19c300c242c589a24bfd57ec9531
+   line  1429  2026-09-18 18:28:10,024  session=20260918_122501_efcba6e6  attempt_id=be3f4538f7a44e4fa71dec8bbdb3cf0e
+   line  1923  2026-09-18 18:46:49,015  session=20260918_122501_efcba6e6  attempt_id=bfe4c49af3904ef18dea72a3ce0ed348
+The remaining 40 lines carry the older 'lite' schema with these 10 keys only: attempt_id, chunk_count,
+chunking, commit_ms, commit_status, event, fallback_used, session_id, split_status, total_duration_ms.
+CORRECTION to the central correction: the 17:33:20 committed record (S1 line 152) has 10 keys, not 13.
+All 5 geometry records are ABORTED attempts of ONE session (20260918_122501_efcba6e6).
+
+====================================================================================================
+1. PER-RECORD EVIDENCE (EXACT = verbatim from the JSON on that S1 line)
+====================================================================================================
+
+--- RECORD A: S1 line 161 ---
+  timestamp                      = 2026-09-18 17:33:24,632                [EXACT S1:161]
+  attempt_id                     = c25391b551d54d1daca8b07eb826d043  [EXACT]
+  session_id                     = 20260918_122501_efcba6e6
+  trigger_source                 = auto
+  current_estimated_tokens       = 80927                        [EXACT]
+  protected_head_tokens          = 0                             [EXACT]
+  protected_tail_tokens          = 45832                        [EXACT]
+  middle_window_tokens           = 0                             [EXACT]
+  effective_threshold            = 80000                        [EXACT]
+  deterministic_reclaim_estimate = 0                             [EXACT]
+  chunk_count                    = 0                             [EXACT]
+  chunking                       = false                         [EXACT]
+  commit_status                  = aborted                       [EXACT]
+  split_status                   = aborted                       [EXACT]
+  commit_ms                      = null                          [EXACT]
+  total_duration_ms              = 20                             [EXACT]
+  failure_class (abort reason)   = no_progress                      [EXACT value / caller-stamped, see S6 D1]
+  prellm_skip_count              = 0                             [EXACT]
+  ineffective_compression_count  = 1                             [EXACT]
+  fallback_used                  = false                         [EXACT]
+  aux_model / aux_call_duration  = '' / null             [EXACT: aux LLM never called]
+  main_context_limit             = 1000000                      [EXACT]
+  n_messages at attempt start    = 105    [EXACT S1:159 @ 2026-09-18 17:33:24,611]
+  caller start->emit wall clock  = 17:33:24,611 -> 17:33:24,632   [EXACT, equals total_duration_ms 20]
+  provider prompt of next call   = in=81155 (S1:162, session ?)
+  cet - (head+middle+tail)       = 35095  [EXACT arithmetic; see S5]
+
+--- RECORD B: S1 line 1205 ---
+  timestamp                      = 2026-09-18 18:23:14,164                [EXACT S1:1205]
+  attempt_id                     = 05e2ceead4b148c48c34fcc85606ccd9  [EXACT]
+  session_id                     = 20260918_122501_efcba6e6
+  trigger_source                 = auto
+  current_estimated_tokens       = 83083                        [EXACT]
+  protected_head_tokens          = 0                             [EXACT]
+  protected_tail_tokens          = 47778                        [EXACT]
+  middle_window_tokens           = 0                             [EXACT]
+  effective_threshold            = 80000                        [EXACT]
+  deterministic_reclaim_estimate = 0                             [EXACT]
+  chunk_count                    = 0                             [EXACT]
+  chunking                       = false                         [EXACT]
+  commit_status                  = aborted                       [EXACT]
+  split_status                   = aborted                       [EXACT]
+  commit_ms                      = null                          [EXACT]
+  total_duration_ms              = 19                             [EXACT]
+  failure_class (abort reason)   = no_progress                      [EXACT value / caller-stamped, see S6 D1]
+  prellm_skip_count              = 0                             [EXACT]
+  ineffective_compression_count  = 0                             [EXACT]
+  fallback_used                  = false                         [EXACT]
+  aux_model / aux_call_duration  = '' / null             [EXACT: aux LLM never called]
+  main_context_limit             = 1000000                      [EXACT]
+  n_messages at attempt start    = 56    [EXACT S1:1203 @ 2026-09-18 18:23:14,144]
+  caller start->emit wall clock  = 18:23:14,144 -> 18:23:14,164   [EXACT, equals total_duration_ms 19]
+  provider prompt of next call   = in=83046 (S1:1206, session ?)
+  cet - (head+middle+tail)       = 35305  [EXACT arithmetic; see S5]
+
+--- RECORD C: S1 line 1401 ---
+  timestamp                      = 2026-09-18 18:27:12,244                [EXACT S1:1401]
+  attempt_id                     = 382b19c300c242c589a24bfd57ec9531  [EXACT]
+  session_id                     = 20260918_122501_efcba6e6
+  trigger_source                 = auto
+  current_estimated_tokens       = 83510                        [EXACT]
+  protected_head_tokens          = 0                             [EXACT]
+  protected_tail_tokens          = 46152                        [EXACT]
+  middle_window_tokens           = 0                             [EXACT]
+  effective_threshold            = 80000                        [EXACT]
+  deterministic_reclaim_estimate = 0                             [EXACT]
+  chunk_count                    = 0                             [EXACT]
+  chunking                       = false                         [EXACT]
+  commit_status                  = aborted                       [EXACT]
+  split_status                   = aborted                       [EXACT]
+  commit_ms                      = null                          [EXACT]
+  total_duration_ms              = 20                             [EXACT]
+  failure_class (abort reason)   = no_progress                      [EXACT value / caller-stamped, see S6 D1]
+  prellm_skip_count              = 0                             [EXACT]
+  ineffective_compression_count  = 1                             [EXACT]
+  fallback_used                  = false                         [EXACT]
+  aux_model / aux_call_duration  = '' / null             [EXACT: aux LLM never called]
+  main_context_limit             = 1000000                      [EXACT]
+  n_messages at attempt start    = 84    [EXACT S1:1399 @ 2026-09-18 18:27:12,224]
+  caller start->emit wall clock  = 18:27:12,224 -> 18:27:12,244   [EXACT, equals total_duration_ms 20]
+  provider prompt of next call   = in=83483 (S1:1402, session ?)
+  cet - (head+middle+tail)       = 37358  [EXACT arithmetic; see S5]
+
+--- RECORD D: S1 line 1429 ---
+  timestamp                      = 2026-09-18 18:28:10,024                [EXACT S1:1429]
+  attempt_id                     = be3f4538f7a44e4fa71dec8bbdb3cf0e  [EXACT]
+  session_id                     = 20260918_122501_efcba6e6
+  trigger_source                 = auto
+  current_estimated_tokens       = 84079                        [EXACT]
+  protected_head_tokens          = 0                             [EXACT]
+  protected_tail_tokens          = 46148                        [EXACT]
+  middle_window_tokens           = 0                             [EXACT]
+  effective_threshold            = 80000                        [EXACT]
+  deterministic_reclaim_estimate = 0                             [EXACT]
+  chunk_count                    = 0                             [EXACT]
+  chunking                       = false                         [EXACT]
+  commit_status                  = aborted                       [EXACT]
+  split_status                   = aborted                       [EXACT]
+  commit_ms                      = null                          [EXACT]
+  total_duration_ms              = 22                             [EXACT]
+  failure_class (abort reason)   = no_progress                      [EXACT value / caller-stamped, see S6 D1]
+  prellm_skip_count              = 0                             [EXACT]
+  ineffective_compression_count  = 1                             [EXACT]
+  fallback_used                  = false                         [EXACT]
+  aux_model / aux_call_duration  = '' / null             [EXACT: aux LLM never called]
+  main_context_limit             = 1000000                      [EXACT]
+  n_messages at attempt start    = 86    [EXACT S1:1427 @ 2026-09-18 18:28:10,006]
+  caller start->emit wall clock  = 18:28:10,006 -> 18:28:10,024   [EXACT, equals total_duration_ms 22]
+  provider prompt of next call   = in=77732 (S1:1431, session ?)
+  cet - (head+middle+tail)       = 37931  [EXACT arithmetic; see S5]
+
+--- RECORD E: S1 line 1923 ---
+  timestamp                      = 2026-09-18 18:46:49,015                [EXACT S1:1923]
+  attempt_id                     = bfe4c49af3904ef18dea72a3ce0ed348  [EXACT]
+  session_id                     = 20260918_122501_efcba6e6
+  trigger_source                 = auto
+  current_estimated_tokens       = 84037                        [EXACT]
+  protected_head_tokens          = 0                             [EXACT]
+  protected_tail_tokens          = 45785                        [EXACT]
+  middle_window_tokens           = 0                             [EXACT]
+  effective_threshold            = 80000                        [EXACT]
+  deterministic_reclaim_estimate = 0                             [EXACT]
+  chunk_count                    = 0                             [EXACT]
+  chunking                       = false                         [EXACT]
+  commit_status                  = aborted                       [EXACT]
+  split_status                   = aborted                       [EXACT]
+  commit_ms                      = null                          [EXACT]
+  total_duration_ms              = 23                             [EXACT]
+  failure_class (abort reason)   = no_progress                      [EXACT value / caller-stamped, see S6 D1]
+  prellm_skip_count              = 0                             [EXACT]
+  ineffective_compression_count  = 1                             [EXACT]
+  fallback_used                  = false                         [EXACT]
+  aux_model / aux_call_duration  = '' / null             [EXACT: aux LLM never called]
+  main_context_limit             = 1000000                      [EXACT]
+  n_messages at attempt start    = 84    [EXACT S1:1921 @ 2026-09-18 18:46:48,992]
+  caller start->emit wall clock  = 18:46:48,992 -> 18:46:49,015   [EXACT, equals total_duration_ms 23]
+  provider prompt of next call   = in=83692 (S1:1924, session ?)
+  cet - (head+middle+tail)       = 38252  [EXACT arithmetic; see S5]
+
+====================================================================================================
+2. CODE-PATH CLASSIFICATION (which branch produced each record)
+====================================================================================================
+TWO distinct emitters can produce event=compression_attempt, and ONE field separates them:
+  PATH-A = early return at S2:4657 (label 'no_compressible_window'):
+    4656  compress_start, compress_end = self._compress_window(messages)
+    4657  if compress_start >= compress_end:   -> returns at 4665
+    4658  regions recorded with middle_messages=[]  (literal empty list)
+    4663  return self._structural_no_op_result('no_compressible_window - transcript fits within tail budget')
+  PATH-B = region recorder at S2:4672 -> early return at S2:4680 (label 'empty_post_handoff_window'):
+    4670-4671 scan = self._scan_window_handoffs(...); turns_to_summarize = scan.turns_to_summarize
+    4672      self._record_compression_regions(head=messages[:cs], middle=turns_to_summarize, tail=messages[ce:])
+    4676-4678 telemetry['deterministic_reclaim_estimate'] = max(0, pre - estimate(messages))
+    4679      telemetry['chunk_count'] = 1 if turns_to_summarize else 0
+    4680-4686 if not turns_to_summarize: return self._structural_no_op_result(telemetry,
+              'empty_post_handoff_window', f'window {cs}-{ce} holds only already-summarized handoffs')
+DISCRIMINATOR (PROOF, not guess): grep 'deterministic_reclaim_estimate' S2 -> hits ONLY 1682 (init to None)
+and 4676 (assignment). PATH-A returns at 4665, i.e. BEFORE 4676, so its record must show null - the way
+commit_ms and aux_model do. All 5 records show integer 0 => 4676 executed => ALL FIVE ARE PATH-B.
+SECOND, INDEPENDENT CONFIRMATION: middle_window_tokens==0 was written at 4672 from turns_to_summarize and
+chunk_count==0 at 4679 from the same list -> the POST-scan list was empty, which is exactly the 4680 test.
+THIRD: aux_model=='' / aux_call_duration_ms==null => the aux summary LLM (_summarize_window) never ran.
+FOURTH: S1 shows the caller's 'Compression made no progress (session=...) - skipping boundary rewrite.'
+(S3:3172-3174) on the line immediately before each telemetry line.
+=> Per-record classification: A, B, C, D and E are all PATH-B (early return at S2:4680, label
+   'empty_post_handoff_window'), reached through the recorder at S2:4672.
+=> NO record was produced by the S2:4657 early return; the string at S2:4663 ('transcript fits within
+   tail budget') is NOT the operative reason for any of the 5.
+
+====================================================================================================
+3. IMPLIED compress_start / compress_end - AND WHAT IS NOT STORED
+====================================================================================================
+STATED EXPLICITLY: the telemetry does NOT store compress_start, does NOT store compress_end, and does NOT
+store len(turns_to_summarize) (neither pre-scan nor post-scan). The only geometry keys the writer ever sets
+are protected_head_tokens (S2:1700), middle_window_tokens (S2:1701) and protected_tail_tokens (S2:1702);
+no index or boundary key exists in the 37-key schema of any record. No index below is invented.
+
+compress_start = 0 for all 5 records                      [EXACT]
+  protected_head_tokens = estimate_messages_tokens_rough(messages[:compress_start]) (S2:1700) and the
+  recorded value is 0; a non-empty slice of a 56-105 message transcript cannot estimate to 0.
+  Code agreement: head = _protect_head_size = (1 if messages[0].role=='system' else 0) + _effective_protect_first_n
+  (S2:3923, called at S2:4361). protect_first_n defaults to 3 (S4:1449) but decays to 0 once
+  compression_count>=1 or _previous_summary is set (S2:3908) - true here, since the same session committed a
+  compression at 17:33:20 (S1:152). So head=0, which also means messages[0] is NOT a system message.
+
+compress_end = 1 for all 5 records                         [RECONSTRUCTED - bounds forced by code, not recorded]
+  Forced by the PATH-B precondition (S2:4680) together with the window construction at S2:4320-4322:
+    turns_to_summarize = [non-None rows of messages[compress_start..summary_idx+1]] + messages[summary_idx+1:compress_end]
+  Emptiness therefore requires (i) every row in messages[compress_start..summary_idx] to strip to None
+  (S2:4316-4318 drops standalone handoff rows) and (ii) messages[summary_idx+1:compress_end] to be empty,
+  i.e. compress_end <= summary_idx+1. With compress_start=0 the only arithmetically credible shape is a
+  ONE-ROW window: the previous compaction's handoff summary sits at index 0 and compress_end=1, so that
+  protected_tail_tokens = estimate(messages[1:]) = 45,832 (A) / 47,778 (B) / 46,152 (C) / 46,148 (D) / 45,785 (E).
+  The rival shape - a long window whose every row is a handoff - would need ~95 handoff rows in a
+  105-message transcript and is not credible. No index in the telemetry can settle it, so '1' is labelled
+  RECONSTRUCTED and a bare index is never presented as measured.
+  Why an exact value is impossible even in principle: the tail is recorded as a token SUM (S2:1702), and the
+  anchors _ensure_last_user_message_in_tail / _ensure_last_assistant_message_in_tail (S2:4252-4253, body at
+  S2:3983-4006) walk the cut BACKWARD ONLY, so an unknown number of messages can be absorbed into the tail.
+
+len(turns_to_summarize) POST-scan = 0 for all 5            [EXACT]
+  Two independent fields pin it: chunk_count (S2:4679) and middle_window_tokens (S2:4672).
+len(turns_to_summarize) PRE-scan  = UNKNOWN                 [NOT STORED]
+  The pre-scan list never reaches the log: S2:4672 overwrites middle_window_tokens with the POST-scan value.
+WHERE THE INDICES WERE LOST: the reason string built at S2:4684-4685 literally contains them
+  ('window {compress_start}-{compress_end} holds only already-summarized handoffs') and the normal path
+  logs them via _log_compression_start(display_tokens, compress_start, compress_end, len(turns_to_summarize), ...)
+  at S2:4688 - but both are guarded by 'if not self.quiet_mode' (S2:2026 for the warning, S2:4688 for the
+  start log). The gateway builds its turn agent with quiet_mode=True (S6:2161), so neither line is written.
+  That is the mechanical reason the boundary indices are unrecoverable from this box's logs.
+
+====================================================================================================
+4. TAIL BUDGET CONFIGURATION AND ITS NUMERIC VALUE PER RECORD
+====================================================================================================
+  tail_mode          : compression.tail_mode, default 'lean' (S4:1466). S5 has no tail_mode key.
+  tail_token_budget  : property S2:1808-1816; lean branch S2:1813 =
+                       max(LEAN_TAIL_FLOOR_TOKENS, min(LEAN_TAIL_CAP_TOKENS, int(context_length * 0.025)))
+                       LEAN_TAIL_FLOOR_TOKENS=10_000 (S2:756), LEAN_TAIL_CAP_TOKENS=25_000 (S2:757).
+                       context_length=1,000,000 (main_context_limit in all 5 records) => budget = 25,000 tokens.
+                       Same for all 5 records.                              [EXACT] soft ceiling = int(budget*1.5) = 37,500 (S2:4235)
+  config key feeding it: the model context window (compression.context_length / main_context_limit).
+  effective_threshold source: compression.threshold_tokens=80000 (S5:121), cap over compression.threshold=0.35
+                       (S5:116); telemetry field set from self.threshold_tokens (S2:1674) => 80000 in all 5. [EXACT]
+  protect_last_n     : compression.protect_last_n default 20 (S4:1436); no such key in S5.
+  protect_first_n    : compression.protect_first_n default 3 (S4:1449), decayed to 0 here (S2:3908).
+  _MAX_TAIL_MESSAGE_FLOOR = 8 (S2:971); message-count floor = max(3, min(protect_last_n=20, 8)) = 8 (S2:4231).
+
+DID ALL MESSAGES FIT INSIDE THE TAIL BUDGET?  NO.                        [EXACT arithmetic on recorded fields]
+   line 161: tail 45832 vs budget 25000 = 1.83x budget; vs soft ceiling 37500 = 1.22x  -> BOTH EXCEEDED
+   line 1205: tail 47778 vs budget 25000 = 1.91x budget; vs soft ceiling 37500 = 1.27x  -> BOTH EXCEEDED
+   line 1401: tail 46152 vs budget 25000 = 1.85x budget; vs soft ceiling 37500 = 1.23x  -> BOTH EXCEEDED
+   line 1429: tail 46148 vs budget 25000 = 1.85x budget; vs soft ceiling 37500 = 1.23x  -> BOTH EXCEEDED
+   line 1923: tail 45785 vs budget 25000 = 1.83x budget; vs soft ceiling 37500 = 1.22x  -> BOTH EXCEEDED
+   So the S2:4663 claim 'transcript fits within tail budget' does NOT hold for these records, and it is also
+   moot because PATH-A was never taken. The S2:4237-4239 re-cut ('Whole transcript fits soft_ceiling: re-cut
+   with the raw budget so a worthwhile middle [exists]') is the branch that WOULD guard this case; it is
+   gated on accumulated <= soft_ceiling, which 45.8k tokens of tail exceeds - hence no re-cut happened.
+   The tail overshoots its own 25,000-token budget because the budget only drives _walk_tail_budget's break
+   test (S2:2621, 4236) while the Role/message anchors (S2:4252-4253) may only move the cut BACKWARD; the
+   budget is a target, not a bound. Per-record realized budget: 25,000 tokens (configured), actual tail
+   45,832 / 47,778 / 46,152 / 46,148 / 45,785 tokens.
+
+====================================================================================================
+5. MUST head + middle + tail SUM TO current_estimated_tokens?  NO.
+====================================================================================================
+The three region fields and current_estimated_tokens are measured on different bases:
+  - head/middle/tail are estimates over SLICES of the message list only (S2:1700-1702).
+  - current_estimated_tokens is the caller's PROMPT-level estimate handed to the attempt (set at S2:1679
+    from current_tokens); it covers system prompt + tool schemas + messages.
+Remainder = current_estimated_tokens - (head+middle+tail), EXACT arithmetic on recorded values:
+   line 161: 80927 - (0+0+45832) = 35095 tokens not in any region field
+   line 1205: 83083 - (0+0+47778) = 35305 tokens not in any region field
+   line 1401: 83510 - (0+0+46152) = 37358 tokens not in any region field
+   line 1429: 84079 - (0+0+46148) = 37931 tokens not in any region field
+   line 1923: 84037 - (0+0+45785) = 38252 tokens not in any region field
+WHAT THE REMAINDER IS, AND HOW I KNOW:
+  (a) System prompt + tool/function schemas are not in the measured slices. Proof: the fields estimate
+      messages[:cs], turns_to_summarize and messages[ce:] only (S2:1700-1702), and head==0 requires that
+      messages[0] is not a system message (S2:3923) - the system prompt is prepended at request time.
+  (b) Independent corroboration from the provider side (S1): the next same-session API call logs its prompt:
+        line 161: no same-session API call follows (next is session ?) - no corroboration available
+        line 1205: no same-session API call follows (next is session ?) - no corroboration available
+        line 1401: no same-session API call follows (next is session ?) - no corroboration available
+        line 1429: no same-session API call follows (next is session ?) - no corroboration available
+        line 1923: no same-session API call follows (next is session ?) - no corroboration available
+  (c) The residue also hides the row at index 0 (the handoff summary itself) plus any pre-scan window rows:
+      middle_window_tokens is written from the POST-scan list (S2:4672) while tail_messages=messages[ce:].
+  Verdict: they MUST NOT sum to current_estimated_tokens; the ~35-38k residual is dominated by system prompt
+  + tool schemas. [remainder EXACT by arithmetic; attribution NEAR-EXACT by (a)+(b)]
+
+====================================================================================================
+6. DEFECTS FOUND (basis of the verdict)
+====================================================================================================
+D1 failure_class is caller-stamped, so a record cannot name its own code path. S2 sets it at 4350
+   (_structural_no_op_result; PATH-B passes 'empty_post_handoff_window' at 4683-4685), but S3:1205-1206 does
+   'if failure_class: payload["failure_class"] = failure_class' and S3:1226/S3:3180 pass 'no_progress'.
+   Consequence: 'no_compressible_window' and 'empty_post_handoff_window' are unobservable in telemetry; the
+   path had to be recovered from deterministic_reclaim_estimate (S2:4676) instead.
+D2 No boundary index is stored, and the lines that would carry them are quiet_mode-gated (S2:4684-4685,
+   S2:4688 vs S6:2161), so head+middle+tail cannot be reconciled to current_estimated_tokens (see S5).
+D3 middle_window_tokens is the POST-scan list (S2:4672), so the record cannot distinguish 'window was only
+   handoffs' from 'window was empty' - two situations with very different fixes.
+D4 PATH-A (S2:4657, reason string S2:4663) is effectively unreachable in this build: _find_tail_cut_by_tokens
+   floors the cut to head_end+1 (S2:4245-4246, S2:4263) and _compress_window only lowers compress_end to a
+   bridge_idx that must satisfy bridge_idx > compress_start (S2:4373-4374), so compress_start>=compress_end
+   cannot arise from the tail walk. The label it guards is dead code in practice.
+
+====================================================================================================
+7. CONTEXT FROM THE SAME SERIES
+====================================================================================================
+The 5 aborted attempts span 73 minutes (17:33:24 -> 18:46:49) in one session while current_estimated_tokens
+drifts UP (80,927 -> 84,037) and stays above the 80,000 threshold; every attempt aborts in 19-23 ms with
+middle_window_tokens=0. The immediately preceding turn committed a compression (S1:152, commit_status=committed,
+total_duration_ms=49027, 134 -> 103 messages) - which is what decays protect_first_n to 0 (S2:3908) and leaves
+the handoff summary row at index 0, the structural precondition for PATH-B on every later attempt.
+
+====================================================================================================
+8. VERDICT
+====================================================================================================
+B_bug. The five records are real and fully consistent with PATH-B (early return at context_compressor.py:4680,
+reached via the recorder at 4672); compress_start=0 is EXACT, compress_end=1 is RECONSTRUCTED (+- not
+recorded), post-scan len(turns_to_summarize)=0 is EXACT and pre-scan is NOT STORED. But the telemetry itself
+is defective: it mislabels the producing path (D1), omits every boundary index and the exact lines that hold
+them are quiet_mode-suppressed on this box (D2), measures the middle on the post-scan list (D3), and carries
+an unreachable label (D4). No code, config, database, log, or git state was modified.
+

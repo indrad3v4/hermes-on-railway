@@ -1,0 +1,209 @@
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -1679,6 +1679,8 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
+             "current_estimated_tokens": _safe_int(current_tokens),
+             "effective_threshold": _safe_int(self.threshold_tokens), "protected_head_tokens": None,
+             "protected_tail_tokens": None, "middle_window_tokens": None, "prellm_skip_count": 0,
++            "post_deterministic_tokens": None, "feasibility_skip_reason": None,
++            "feasibility_skip_reasons": None,
+             "deterministic_reclaim_estimate": None,
+             "ineffective_compression_count": int(getattr(self, "_ineffective_compression_count", 0) or 0),
+             "aux_prompt_tokens": None, "aux_output_reservation": None, "aux_provider": "", "aux_model": "",
+@@ -4391,28 +4393,76 @@ Write only the summary body. Do not include any preamble or prefix."""
+ 
+     def _feasibility_skip(
+         self, telemetry: Dict[str, Any], turns_to_summarize: List[Dict[str, Any]],
+-        compress_start: int, compress_end: int,
++        compress_start: int, compress_end: int, current_tokens: Optional[int] = None,
+     ) -> bool:
+-        """Pre-LLM skip after a real-usage ineffectiveness strike (reads the counter, never writes)."""
+-        if self._ineffective_compression_count < 1:
+-            return False
++        """Pre-LLM skip when the LLM call provably cannot reclaim anything (F1).
++
++        One OBJECTIVE fast-path runs before the pre-existing heuristic one: the deterministic
++        passes already brought the live context back under the threshold — decided on the
++        RECOMPUTED post-pass size, never on the reclaim estimate.
++        The heuristic gate (a prior real-usage ineffectiveness strike AND a middle below
++        10% of the threshold, #60451) stays last and unchanged. Reads counters, never writes.
++        """
+         # Reuse the telemetry estimate so log and telemetry agree; None means the regions helper
+         # no-op'd (0 is valid).
+         middle_tokens = telemetry.get("middle_window_tokens")
+         middle_tokens = estimate_messages_tokens_rough(turns_to_summarize) if middle_tokens is None else middle_tokens
++
++        # Fast-path B (objective): the deterministic passes already reclaimed enough. The numbers are
++        # facts, not estimates: post = size recomputed from the live list, reclaim > 0 = the passes
++        # actually dropped something. Without the reclaim>0 guard a caller that passes a synthetic
++        # current_tokens (tests, or a provider count that never matched the message list) would get
++        # its LLM call skipped while nothing was reclaimed — that silently kills the 401/abort path.
++        post_tokens = telemetry.get("post_deterministic_tokens")
++        reclaim = telemetry.get("deterministic_reclaim_estimate")
++        if (
++            post_tokens is not None
++            and current_tokens is not None
++            and current_tokens > self.threshold_tokens
++            and post_tokens <= self.threshold_tokens
++            and isinstance(reclaim, int) and reclaim > 0
++        ):
++            return self._record_prellm_skip(
++                telemetry, "reclaim_sufficient", middle_tokens, compress_start, compress_end,
++            )
++
++        # Pre-existing heuristic gate (#60451), unchanged.
++        if self._ineffective_compression_count < 1:
++            return False
+         if middle_tokens >= int(self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION):
+             return False
++        return self._record_prellm_skip(
++            telemetry, "small_middle", middle_tokens, compress_start, compress_end,
++        )
++
++    def _record_prellm_skip(
++        self, telemetry: Dict[str, Any], reason: str, middle_tokens: int,
++        compress_start: int, compress_end: int,
++    ) -> bool:
++        """Latch a pre-LLM skip: count it, stamp WHY, log it, return True (the caller's contract)."""
+         self._last_feasibility_skip = True
+         self._prellm_skip_count += 1
+         telemetry["prellm_skip_count"] = self._prellm_skip_count
++        telemetry["feasibility_skip_reason"] = reason
++        _reasons = telemetry.get("feasibility_skip_reasons")
++        telemetry["feasibility_skip_reasons"] = (list(_reasons) if isinstance(_reasons, list) else []) + [reason]
+         if not self.quiet_mode:
+-            logger.warning(
+-                "Compression: middle section (%d tokens at indices %d-%d) is below %.0f%% of threshold (%d tokens) — "
+-                "skipping LLM summarization, proceeding with deterministic message dropping. prellm_skip_count=%d",
+-                middle_tokens, compress_start, compress_end,
+-                _FEASIBILITY_SKIP_MIDDLE_FRACTION * 100,
+-                self.threshold_tokens, self._prellm_skip_count,
+-            )
++            if reason == "small_middle":
++                logger.warning(
++                    "Compression: middle section (%d tokens at indices %d-%d) is below %.0f%% of threshold (%d tokens) — "
++                    "skipping LLM summarization, proceeding with deterministic message dropping. prellm_skip_count=%d",
++                    middle_tokens, compress_start, compress_end,
++                    _FEASIBILITY_SKIP_MIDDLE_FRACTION * 100,
++                    self.threshold_tokens, self._prellm_skip_count,
++                )
++            else:
++                logger.warning(
++                    "Compression: pre-LLM skip (%s) — middle=%d tokens at indices %d-%d, post_deterministic=%s, "
++                    "threshold=%d — skipping LLM summarization, proceeding with deterministic message dropping. "
++                    "prellm_skip_count=%d",
++                    reason, middle_tokens, compress_start, compress_end,
++                    telemetry.get("post_deterministic_tokens"), self.threshold_tokens, self._prellm_skip_count,
++                )
+         return True
+ 
+     def _abort_on_summary_failure(
+@@ -4673,9 +4723,14 @@ Write only the summary body. Do not include any preamble or prefix."""
+             head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
+         )
+         # Shadow telemetry (KROK 0): deterministic reclaim measured over the already-run passes above.
++        # The post-pass size is RECOMPUTED from the live message list (not derived from the estimate):
++        # F1's fast-path B decides on this measured number, so it must be a fact, not an estimate.
++        _post_deterministic_tokens = estimate_messages_tokens_rough(messages)
++        telemetry["post_deterministic_tokens"] = _post_deterministic_tokens
+         telemetry["deterministic_reclaim_estimate"] = max(
+-            0, _pre_deterministic_tokens - estimate_messages_tokens_rough(messages),
++            0, _pre_deterministic_tokens - _post_deterministic_tokens,
+         )
++        telemetry["_pre_deterministic_tokens"] = _pre_deterministic_tokens
+         telemetry["chunk_count"] = 1 if turns_to_summarize else 0
+         if not turns_to_summarize:
+             # Window is only handoff rows (#59496): skip the aux call; _previous_summary is KEPT —
+@@ -4691,7 +4746,10 @@ Write only the summary body. Do not include any preamble or prefix."""
+             )
+ 
+         # Phase 3: Generate structured summary (or skip the LLM when the middle is too small to matter)
+-        feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)
++        feasibility_skip = not force and self._feasibility_skip(
++            telemetry, turns_to_summarize, compress_start, compress_end,
++            current_tokens if isinstance(current_tokens, int) else None,
++        )
+         summary = None  # feasibility skip: no LLM call; Phase 4 inserts the deterministic fallback
+         if not feasibility_skip:
+             summary = self._summarize_window(
+--- a/tests/agent/test_context_compressor.py
++++ b/tests/agent/test_context_compressor.py
+@@ -3667,3 +3667,79 @@ class TestSanitizeToolPairsWhitespace:
+         tool_call_ids = [m.get("tool_call_id") for m in out if m.get("role") == "tool"]
+         assert "call_orphan" not in tool_call_ids, "genuinely orphaned result must be removed"
+         assert " call_orphan " not in tool_call_ids, "original whitespace form must also be gone"
++
++
++class TestF1FeasibilityFastPaths:
++    """F1: one OBJECTIVE pre-LLM fast-path, then the unchanged heuristic gate.
++
++    A skip means the LLM summarization call is NOT made and the deterministic
++    message dropping proceeds. Each test asserts BOTH the verdict and the stamped
++    reason — a skip that fires for the wrong reason is a silent regression.
++    """
++
++    def _compressor(self):
++        from agent.context_compressor import ContextCompressor
++        c = ContextCompressor(model="test/model", quiet_mode=True,
++                              protect_first_n=2, protect_last_n=2)
++        c.threshold_tokens = 80_000
++        c._ineffective_compression_count = 0
++        c._prellm_skip_count = 0
++        return c
++
++    # --- removed fast-path A: an empty middle is NOT a skip ---------------- 
++    def test_empty_middle_does_not_skip(self):
++        """REGRESSION (F1 audit): an empty middle must NOT be a fast-path. Production proves the
++        state is reachable ONLY through the structural no-op exits (4657/4680 cold, 4680 hot),
++        both of which return BEFORE _feasibility_skip — so a skip here was dead code, and in the
++        unreachable state it would silently replace the safe no-op with summary dropping."""
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 0, "post_deterministic_tokens": 84_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 84_000) is False
++        assert telemetry.get("feasibility_skip_reason") is None
++        assert c._prellm_skip_count == 0
++
++    # --- fast-path B: deterministic passes already reclaimed enough --------
++    def test_reclaim_sufficient_skips_llm(self):
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 30_000, "post_deterministic_tokens": 50_000,
++                     "deterministic_reclaim_estimate": 25_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 95_000) is True
++        assert telemetry["feasibility_skip_reason"] == "reclaim_sufficient"
++
++    def test_reclaim_zero_does_not_skip_even_under_threshold(self):
++        """Guard: a synthetic/high current_tokens with nothing actually dropped must still call the
++        LLM — otherwise the 401/abort-preserve-session path is silently disabled."""
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 30_000, "post_deterministic_tokens": 1_000,
++                     "deterministic_reclaim_estimate": 0}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 999_999) is False
++        assert telemetry.get("feasibility_skip_reason") is None
++
++    def test_reclaim_insufficient_runs_the_llm(self):
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 30_000, "post_deterministic_tokens": 92_000,
++                     "deterministic_reclaim_estimate": 3_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 95_000) is False
++        assert telemetry.get("feasibility_skip_reason") is None
++        assert c._prellm_skip_count == 0
++
++    # --- unchanged semantics: no pressure, no strike → normal LLM path -----
++    def test_no_trigger_pressure_keeps_old_behaviour(self):
++        """current_tokens unknown (not an over-threshold trigger) → fast-path B must NOT fire."""
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 30_000, "post_deterministic_tokens": 10_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, None) is False
++
++    def test_large_middle_no_strike_runs_the_llm(self):
++        """Normal LLM compression path: a big middle with no strike is never skipped."""
++        c = self._compressor()
++        telemetry = {"middle_window_tokens": 40_000, "post_deterministic_tokens": 95_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 95_000) is False
++
++    def test_heuristic_gate_still_skips_small_middle_with_strike(self):
++        """The pre-existing #60451 gate is preserved verbatim."""
++        c = self._compressor()
++        c._ineffective_compression_count = 1
++        telemetry = {"middle_window_tokens": 5_000, "post_deterministic_tokens": 95_000}
++        assert c._feasibility_skip(telemetry, [], 2, 9, 95_000) is True
++        assert telemetry["feasibility_skip_reason"] == "small_middle"
