@@ -1,0 +1,200 @@
+==============================================================================
+F-SERIES STATUS — 2026-09-18 (evening revision)
+Hermes latency / context-compression work
+Single source of truth for every F item. Companion to the PR description.
+==============================================================================
+
+Two different things are called "F" in this work, and the collision is
+deliberate here: F1..F6 are the WORK ITEMS from the latency audit, while
+`patches/latency-f*.patch` are FILES. They are not the same numbering, and this
+branch contains a file `latency-f1b-observability.patch` that has no work item
+of its own — it is the telemetry half of F1. Read the table, not the filenames.
+
+------------------------------------------------------------------------------
+STATUS TABLE
+------------------------------------------------------------------------------
+
+  item  work item                          status            artifact
+  ----  ---------------------------------  ----------------  ----------------------
+  F1    pre-LLM feasibility skip:           DONE (PR, r2)     patches/latency-
+        redesign the criterion                                 f1-feasibility-
+                                                               fastpaths.patch
+  F1b   observability for F1 (added after    DONE (PR)         patches/latency-
+        the second audit)                                      f1b-observability.patch
+  F2    symmetry for the middle window      DESIGN ONLY       docs/.../f2-design-
+                                                               note.txt
+  F3    prompt-side output budget           DONE (67a2ae9)    patches/latency-
+                                                               f3-summary-budget.patch
+  F4    lower the 420 s terminal limit      REJECTED FOREVER  none — no artifact
+  F5    Chromium leak                       AUDITED (no leak) docs/.../f5-chromium-
+                                                               lifecycle.txt
+  F6    toolset composition audit           AUDITED           docs/.../f6-toolset-
+                                                               usage.txt
+
+Also in this branch for context, NOT an F item:
+  patches/latency-f0-shadow-telemetry.patch  — write-only telemetry fields
+  docs/.../full-latency-audit.txt           — the F1..F6 audit that opened this
+  docs/.../f1-window-geometry.txt           — the geometry audit (F1 source)
+  docs/.../f1-controlflow-audit.txt         — the audit that proved fast-path A dead
+  docs/.../f1-rootcause-revision2.txt       — the root cause, revision 2
+  docs/.../f1-benchmark.json                — decision-cost + LLM-duration numbers
+
+------------------------------------------------------------------------------
+F1 — objective pre-LLM feasibility skip  [DONE in this PR, revision 2]
+------------------------------------------------------------------------------
+
+What changed vs. the first draft of this PR: the draft shipped TWO fast-paths
+(A = empty middle, B = reclaim sufficient). A is deleted. B survives with a
+`reclaim > 0` guard. The pre-existing heuristic gate is unchanged and still
+evaluated last.
+
+Why A died — the proof, not a preference:
+
+  `deterministic_reclaim_estimate` is assigned in exactly two places in
+  agent/context_compressor.py: line 1682 (`None`) and line 4676. Fast-path A's
+  exit returns at line 4665 — BEFORE 4676. A record produced by that exit would
+  carry `null`, exactly like `commit_ms`.
+
+  All five full production records carry an integer `0`. All five therefore
+  executed 4676 and reached the `empty_post_handoff_window` exit at 4680. None
+  reached the A exit at 4657. A's two tests passed only because they built the
+  unreachable state by hand.
+
+  Deleting A is a safety fix, not tidying: in the state A guarded, A would have
+  replaced a safe structural no-op with a SKIP that proceeds into deterministic
+  dropping and can replace summaries.
+
+Root cause of `middle_window_tokens = 0` (closes the old open question 5):
+the window was a single already-summarized handoff row left at index 0 by the
+17:33:20 compression (134 → 103 messages, 49.0 s). Five no-ops in 73 minutes at
+19–23 ms each. The middle was not empty; it was un-summarisable. Full chain:
+docs/.../f1-rootcause-revision2.txt.
+
+Honest measurement statement: the observable production win for F1-B today is
+ZERO events. No record has `reclaim > 0` with a post-pass size under threshold.
+B was demonstrated on an isolated probe — synthetic `current_tokens`, but a REAL
+deterministic reclaim: `pre_estimate 50 129`, `deterministic_reclaim 49 988`,
+`post_deterministic_tokens 141`, `middle_window_tokens 29` (middle NON-empty),
+`llm_calls 0`, reason `reclaim_sufficient`. That is a synthetic witness, not
+production traffic.
+
+The `reclaim > 0` guard is load-bearing, not decorative — one-clause ablation on
+the patched copy: WITH `and isinstance(reclaim, int) and reclaim > 0` → 24 passed;
+WITHOUT it → TestAuthFailureAborts, TestAbortOnSummaryFailure and
+TestCooldownReentryAbort (x2) fail. Without the guard, B skips the LLM, falls
+through with `summary = None`, and Phase 4 REPLACES the transcript with the
+deterministic fallback instead of aborting — hiding a blocked key behind a
+placeholder.
+
+F1b exists to make such an event visible when it happens.
+
+Falsifier: an aggregate in which no compression attempt ever shows
+`reclaim > 0` with `post_deterministic_tokens < effective_threshold` would mean B
+is dead code in the same way A was. F1b's fields are what make that testable.
+
+------------------------------------------------------------------------------
+F1b — observability for F1  [DONE in this PR]
+------------------------------------------------------------------------------
+
+Telemetry only, zero behaviour change. Three additions:
+  * `window_start` / `window_end`, stamped BEFORE every early return, so a
+    structural no-op records the window it judged.
+  * `middle_window_pre_scan_tokens` — the middle's size BEFORE
+    `_scan_window_handoffs` reclassifies already-summarized rows. Without it,
+    "the window was empty" and "the window held nothing but handoffs" both read
+    `middle_window_tokens = 0`.
+  * `attempt_failure_class` — the compressor's structural class is no longer
+    overwritten by the caller's coarse `no_progress`; both are readable on one
+    line.
+
+The patch file is named `f1b` and not `f2` on purpose: this PR already contains
+an F2 design note, and reusing the number would have made the diff ambiguous.
+
+------------------------------------------------------------------------------
+F2 — symmetry for the middle window  [DESIGN ONLY — verdict: DO NOT IMPLEMENT]
+------------------------------------------------------------------------------
+
+The note (docs/.../f2-design-note.txt) concludes F2 is REDUNDANT as specified:
+
+  * `_prune_old_tool_results` (line 2741 in the pinned tree; 4648 in the F2 note's
+    numbering) already demotes every
+    non-tail tool result longer than `_PRUNE_MIN_CHARS = 200` (line 661) to a
+    one-line summary. F2's proposed 1 500-char floor is a strict SUBSET of what
+    already happens, and with a worse replacement string.
+  * The mass lives in the protected TAIL, not the middle: in 4 of 4 live records
+    `middle_window_tokens = 0` while `protected_tail_tokens` = 45 832–47 778.
+  * Exact-duplicate removal is already harvested before the LLM call: 1 duplicate
+    group / 3 946 chars out of 23.9 M = 0.02 %.
+
+The note states a FALSIFIER instead of a verdict: if
+`demoted_middle_chars / middle_tool_chars_post_pass_2` comes out below ~10–20 %,
+F2 is redundant with the existing 200-char floor, and the correct lever is a
+config threshold change — not a new pass.
+
+------------------------------------------------------------------------------
+F3 — prompt-side output budget  [DONE, already on main in 67a2ae9]
+------------------------------------------------------------------------------
+
+patches/latency-f3-summary-budget.patch lowers two output-side budgets:
+    _SUMMARY_TOKENS_CEILING           10 000 → 5 000
+    _LEAN_SESSION_LOG_BUDGET_TOKENS    4 000 → 1 500
+
+No wire-level max_tokens was added (explicitly forbidden in the code); the
+head / anchor / verbatim prompt sections are untouched. Rationale: it cuts the
+tail of the aux model's OUTPUT distribution, where the 60–77 s calls live.
+Verified: `git apply --check` + apply on a clean 9e0dc431, both patches in order,
+constants present in the tree, `ast.parse` OK, 147 tests passed, and the values
+confirmed live in /opt/hermes after the redeploy.
+
+Open question carried forward: does the 10k → 5k ceiling lose detail on long
+technical transcripts (tool details), and can that be held while preserving the
+detail that matters (unfinished tasks, paths)?
+
+------------------------------------------------------------------------------
+F4 — lower the 420-second terminal limit  [REJECTED FOREVER]
+------------------------------------------------------------------------------
+
+tool_executor.py:777-783 holds that limit deliberately (332 timeouts, ~$4k of
+orchestrator loss in the audit window). Removing it would abort legitimate long
+tools. There is no artifact for F4 and no artifact is planned. Do not raise it
+again.
+
+------------------------------------------------------------------------------
+F5 — Chromium leak  [AUDITED — the earlier "leak confirmed" claim does not hold]
+------------------------------------------------------------------------------
+
+The audit (docs/.../f5-chromium-lifecycle.txt) measured the resident browser
+tree: 12 processes, 1.06 GiB STABLE over three samples, no zombies, no tab leak.
+The container cgroup reads ~99 % but that is page cache, not Chromium.
+
+This CORRECTS the earlier framing in which the leak was "confirmed by numbers".
+What is confirmed is only that the tree is not releasing BACK to a lower floor;
+whether that is a leak or just a warm pool is not settled by three samples. There
+is NO supervisor: kill the master and the browser stays dead until a container
+restart. That is an operational gap, not a patch to the engine.
+
+Falsifier: a sample sequence whose RSS rises monotonically across a much longer
+window with no page activity would turn "warm pool" into "leak".
+
+------------------------------------------------------------------------------
+F6 — toolset composition audit  [AUDITED]
+------------------------------------------------------------------------------
+
+The audit (docs/.../f6-toolset-usage.txt) covered 21 configured toolsets. Note
+the window is 9.2 DAYS, not the 30 days first intended — state.db does not hold
+30 days of usable rows here. Three toolsets show zero use; `connections` and
+`context_engine` resolve to 0 tools statically and must NOT be recorded as dead
+without a separate check. This is an audit, not a patch; no toolset was removed.
+
+------------------------------------------------------------------------------
+WHAT IS NOT IN ANY OF THIS
+------------------------------------------------------------------------------
+
+  * No configuration change: threshold_tokens stays 80 000, micro_compact false,
+    proactive_prune_tokens 48 000, firecrawl-mcp disabled, streaming false,
+    model = deepseek-flash (DeepSeek direct).
+  * No wire-level max_tokens for the compressor (forbidden in code).
+  * No touch of the head / anchor / verbatim prompt sections.
+  * Nothing pushed to main. This is a PR; a merge would not ship fast-path A.
+
+==============================================================================

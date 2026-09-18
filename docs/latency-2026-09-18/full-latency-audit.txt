@@ -1,0 +1,247 @@
+HERMES — FULL LATENCY / RESPONSE-SPEED AUDIT (READ-ONLY)
+Дата: 2026-09-18 · Бокс: Railway-кантэйнер (PID1 = hermes gateway run) · Час зоны Europe/Warsaw
+Скоуп: production, без мутацый. Усе лічбы — з жывых логаў/БД/ps на гэтым боксе.
+
+===========================================================
+1. EXECUTIVE DIAGNOSIS — дзе рэальна губляецца час
+===========================================================
+Галоўная страта — LLM-сціск (compression), а не тулы і не сама мадэль.
+· 66 падзей compression_attempt у logs/agent.log (апошнія ~2 г):
+  committed 61, aborted 5 (усе 5 — failure_class=no_progress, trigger=auto).
+· total_duration_ms: p50 = 31,887 ms, max = 76,806 ms, min = 14 ms, сума 2,168 s.
+· Размеркаванне: 11 падзей 14–218 ms (дэтэрмінаваныя, бясплатныя),
+  астатнія 50 — 14,3–76,8 s кожная (LLM-выклік).
+· Пры гэтым той жа сціск вяртае ўсяго -4,4k…-23,3k токенаў, г.зн. кошт 30–77 s
+  на 5–20% скарачэнне кантэксту.
+Другая страта — адзінкавыя tool-чаканні: у логу 1 выпадак
+  "terminal timed out after 420.0s" (14:46:50) — гэта 7 хвілін у target-turn.
+Трэцяя — рэсурсная: 13 жывых Chromium renderer (~1,6 GiB у cgroup 4,66 GiB),
+  load average 33,97.
+
+===========================================================
+2. LATENCY BUDGET (па жывых метрыках)
+===========================================================
+no-compression turn:        2,5–3,1 s  (па папярэдніх замерах, пацвярджаецца логам)
+compression turn:           +14–77 s   (p50 ~32 s) — дамінуе
+tool wait (аномалія):       да 420 s
+tool execution (тыпова):    30–100 ms (прыклады: video_analyze 42,7 s — гэта чаканне сэрвісу)
+telegram progressive edit:  0,8 s interval (streaming.transport=edit), не блокіруе LLM
+memory trim (housekeeping): 137–250 ms кожныя 60 s (не ў target-шляху)
+
+===========================================================
+3. ROOT CAUSES (падцверджаныя дадзенымі)
+===========================================================
+R1. LLM-сціск выконваецца галоўнай мадэллю (deepseek-flash) праз auxiliary-выклік,
+    без hard max_tokens на compressor. У логу 48× "Auxiliary compression: using deepseek".
+    Эфект: 30–77 s у кожнай падзеі, 61 committed за сесію.
+R2. prompt cache халодны адразу пасля сціску: сціск перапісвае сярэдзіну кантэксту,
+    наступны выклік плаціць поўны ўвод. (cache_read у жывой сесіі 1 421 824 токенаў
+    супраць 108 198 свежага ўводу — cache працуе, акрамя першага выкліку пасля сціску.)
+R3. 5 з 66 спроб скончыліся no_progress (aborted) — гэта значыць сціск быў выкліканы
+    там, дзе прагрэс немагчымы (няма чаго сціскаць у сярэдзіне). Яны каштуюць танна
+    (14–20 ms) толькі таму, што адбываюцца да LLM — але сам факт 5 трапленняў
+    паказвае, што трыгер працуе без папярэдняй праверкі дастатковасці.
+R4. 13 Chromium renderer працэсаў (client-id 5,6,7,8,38,39,40,41,43,44,45 + zygote/gpu).
+    Кожны 100–160 MB RSS. Гэта галоўны спажывец cgroup-памяці і load.
+R5. Сістэмны промпт вялікі: назіраны памер 45 111 сімвалаў (~11k токенаў) —
+    асноўная частка гэта апісанні 21 тулсета для telegram
+    (browser, computer_use, code_execution, connections, context_engine, cronjob,
+    delegation, file, hermes-telegram, image_gen, memory, session_search, skills,
+    terminal, todo, tts, video, video_gen, vision, web, clarify).
+    Гэта плаціцца ў КОЖНЫМ выкліку і цісне на prompt cache.
+
+===========================================================
+4. SUSPECTED CAUSES (не пацверджаныя)
+===========================================================
+S1. Фрагментацыя cgroup-памяці (memory trim кожныя 60 s, malloc_trim: 293→263 MB)
+    — RSS вагаецца 240–360 MB, але гэта gateway, не пік.
+S2. 1.3 GB state.db, 251 941 радок messages: замеры далі 47,4 ms на count па сесіі
+    і 31,4 ms на 90 радкоў — прымальна, але FTS-індэксы (messages_fts,
+    messages_fts_trigram) павялічваюць БД і кошт запісу.
+S3. tool_result sizes: у актыўным кантэксце самы вялікі 3 132 сімвалы — не праблема.
+S4. Прысутнасць плагінаў: /root/.hermes/plugins = [] (пуста), значыць гістарычная
+    памылка "pre_tool_call plugin callback timed out" цяпер не мае крыніцы;
+    у логу 0 узгадак за 2027 радкоў.
+
+===========================================================
+5. COMPRESSION ANALYSIS
+===========================================================
+Канвеер (file:line):
+  turn_context_compaction.py:139  → выклік _preflight_compression
+  turn_context_compaction.py:229  → def _preflight_compression
+  turn_context_compaction.py:294  → if _preflight_tokens >= threshold_tokens
+  turn_context_compaction.py:305  → _compressor.should_compress(...)
+  turn_context_compaction.py:320-323 → _run_preflight_passes(...)
+  turn_context_compaction.py:346  → def _run_preflight_passes
+  turn_context_compaction.py:377  → loop (max 3 пасы)
+  turn_context_compaction.py:381  → agent._compress_context(...)
+  context_compressor.py:~4620   → Phase 1: _prune_old_tool_results(...)
+  context_compressor.py:4368-4392 → _feasibility_skip (pre-LLM слой)
+Другі шлях (pre-API): turn_preflight.py:57 run_preflight_compression,
+  :99 should_compress, :134 _compress_context.
+Proactive prune: turn_preflight.py:~364 — дасягаецца толькі калі should_compress()==false.
+
+КЛЮЧОВАЕ: pre-LLM слой УЖО існуе — _feasibility_skip (context_compressor.py:4368).
+Але ён рэактыўны:
+  if self._ineffective_compression_count < 1: return False
+г.зн. спрацоўвае толькі ПАСЛЯ таго, як адзін LLM-сціск ужо быў неэфектыўны
+(strike). Праактыўнай праверкі дастатковасці перад LLM няма.
+Гэта супадае з фактам 5 no_progress: яны былі дапушчаны да LLM-шляху,
+але былі адхілены дэтэрмінавана (14–20 ms) — то-бок сістэма ўмее гэта рабіць,
+проста не робіць гэта першым крокам.
+
+Праверка гіпотэз:
+1) Phase 1 перад should_compress() — верхняя мяжа вялікая (dry-run 18,6–51,5k
+   да 2 мс), але гэта РЭКАНСТРУЯВАНЫЯ станы; на рэальным актыўным кантэксце
+   Phase 1 дае 5 511 з 47 760 (11,5%), г.зн. сам не здымае парог 80k.
+   Выснова: як цалкам-замяняльнік — не даказана; як першы слой — сэнс мае.
+2) tail_mode=legacy — не правяралася на жывым кантэксце (патрабуе змены канфігу;
+   у скоупе забаронена).
+3) асобная таннейшая auxiliary-мадэль — самых вялікіх 30–77 s не забярэ:
+   вялікі ўвод (80k) — гэта прэ-філ, а не генерацыя; таннейшая мадэль дасць
+   2–3× на прэ-філе толькі пры істотна большым TPS. Не правяралася.
+4) hard max output compressor — цэль 14k токенаў (summary 10k + lean log 4k),
+   hard limit адсутнічае; вымярэнне паказвае, што фактычныя выхады меншыя
+   (-4,4k…-23,3k), таму абмежаванне само па сабе не зменіць latency прэ-філа.
+5) incremental summary замест перагенерацыі — не правяралася, але гэта
+   карэннае рашэнне для R1/R2 (не перапісваць сярэдзіну, а дапісваць).
+6) падняць threshold — забаронена разглядаць у гэтым этапе.
+7) детермінаваны прын як абавязковы першы слой — падтрымліваецца кодам
+   (_feasibility_skip як прэцэдэнт), але патрабуе доваду на рэальных станах.
+
+===========================================================
+6. TOOL / MCP ANALYSIS
+===========================================================
+mcp_servers: firecrawl-mcp = enabled:false ✓ (R зачынены), tg_business_bridge = enabled:true (stdio).
+У логу: 0 спроб firecrawl, 0 ModuleNotFoundError, 0 узгадак "MCP error".
+За 2027 радкоў лога MCP-узгадак усяго 2. Г.зн. гістарычная праблема firecrawl-mcp
+пасля d62f91e не ўзнаўляецца.
+Тулсеты telegram: 21 (спіс у раздзеле R5). plugins = [].
+Вывад: MCP-слой цяпер не дадае скрытых дзясяткаў секунд.
+
+===========================================================
+7. MEMORY ANALYSIS
+===========================================================
+memory.memory_char_limit=8000, user_char_limit=4000 (не змяняць).
+Ін'екцыя: MEMORY 7 589/8 000 (94,9%), USER 2 082/4 000 (52,1%).
+Г.зн. памяць цяпер блізкая да мяжы — гэта рызыка для якасці, але не для latency.
+Часу на загрузку памяці ў латэнсі-бюджэце не бачна (усе вымеры <1 s).
+Дублявання/памылак ін'екцыі ў логах не знойдзена.
+
+===========================================================
+8. TELEGRAM ANALYSIS
+===========================================================
+streaming.enabled=true, transport=edit, edit_interval=0.8 s, buffer_threshold=24,
+fresh_final_after_seconds=20; display.platforms.telegram.streaming=true.
+ВАЖНА (не змешваць памылкі): гэта Telegram progressive response editing,
+а НЕ wire-level model streaming — апошні застаецца streaming=false у model-секцыі.
+Дублікатаў адпраўкі і памылак API ў логах не знойдзена.
+
+===========================================================
+9. DB / STORAGE ANALYSIS
+===========================================================
+state.db = 1 364,8 MB, journal_mode=wal, messages = 251 941, sessions = 250.
+Найбуйнейшыя сесіі: 20260914_234150_97d2e194 = 74 797 паведамленняў
+(гэта карань «сессия-гигант тормозит» — ужо вядома); 20260908_121945_3ae83e8d = 47 818.
+Індэксы ў парадку: idx_messages_session, idx_messages_session_id,
+idx_messages_session_active, idx_messages_display_page (partial).
+Замеры: count(*) па сесіі 47,4 ms; загрузка 90 радкоў 31,4 ms.
+Вывад: SQLite не з'яўляецца крыніцай дзясяткаў секунд, акрамя выпадкаў
+загрузкі 74k-радковай сесіі (не вымерана асобна).
+Рызыка: FTS (messages_fts + messages_fts_trigram) павялічвае памер і кошт запісу.
+
+===========================================================
+10. RUNTIME / CONCURRENCY
+===========================================================
+PID1 = python hermes gateway run, RSS 532 MB, 1:53 elapsed.
+cgroup: memory.max = 4,66 GiB, current = 2,90 GiB (у момант замера).
+Chromium: 1 browser + 13 renderer + zygote/gpu + 2 crashpad = ~1,6 GiB.
+load average 33,97 / 28,24 / 27,10 — на гэтым хосте гэта вельмі высока (хоць гэта хост,
+не кантэйнер). CPU gateway 3,3%.
+Антыпатэрны (код, не ў target-шляху, але ў наяўнасці):
+  · agent/turn_overflow.py:259 — time.sleep(2) паміж спробамі сціску;
+  · agent/video_gen_provider.py:161 — time.sleep(poll_interval) 5 s;
+  · agent/verify/runner.py:123 — time.sleep(interval);
+  · agent/proxy_sources/iron_proxy.py:835,981 — time.sleep(0,1);
+  · agent/moa_loop.py:490 — _REFERENCE_POLL_INTERVAL_S = 5.0;
+  · agent/review_idle_queue.py:26 — _POLL_INTERVAL_S = 5.0.
+Сінхронныя IO-выклікі (requests.get) — у model_metadata.py (метаданыя мадэлі,
+timeout 5–10 s), provider_media.py, skills; гэта не гарачы шлях Telegram-туру.
+
+===========================================================
+11. EXACT RUNTIME-STATE EVIDENCE (перад сціскам)
+===========================================================
+Класіфікацыя даных:
+  EXACT: няма — у БД няма захаванага стану менавіта на момант спрацоўвання.
+  NEAR-EXACT: 5 тэлеметрычных запісаў з failure_class=no_progress і
+    current_estimated_tokens (прыклад: 80 192 токенаў, effective_threshold 80 000,
+    protected_tail_tokens 34 895, total_duration_ms 20, commit_status aborted).
+    Гэта дакладныя метрыкі, але стан не захаваны.
+  RECONSTRUCTED: 6 зрэзаў з сырых радкоў БД (акно 80–85k):
+    80,176 → 48,955 (reclaim 31,221, 2,8 ms)
+    81,118 → 48,102 (33,016, 1,86 ms)
+    80,040 → 49,320 (30,720, 1,49 ms)
+    84,767 → 51,504 (33,263, 1,42 ms)
+    80,015 → 18,576 (61,439, 1,10 ms)
+    + 80,176 (дубль акна) — 48,955 (2,72 ms)
+  Усе рэканструкцыі: after < 80k у 6/6, LOSSY для змененных tool-вынікаў,
+  mutation=False, protэктны хвост 25 000 токенаў, min_prune_chars=200.
+  АГАВОРКА: гэта верхняя мяжа, бо ў рэальным акне старыя tool-вынікі ўжо
+  замененыя зводкай папярэдняга сціску.
+
+===========================================================
+12. CANDIDATE FIXES
+===========================================================
+fix | evidence | expected impact | risk | complexity | cache impact
+F1. Правяраць дастатковасць (feasibility) ДА LLM-выкліку, а не пасля 1-га strike
+    | _feasibility_skip:4368 рэактыўны; 5 no_progress | прыбірае няпоўныя спробы,
+    не дае 30–77 s на пустых сцісках | нізкі (той жа код, раней выкліканы) | нізкая | не горшыць
+F2. Дэтэрмінаваная Phase 1 як першы слой перад should_compress
+    | dry-run 6/6 <80k (верхняя мяжа); рэальны актыўны 11,5% | патэнцыйна здымае
+    частку LLM-выклікаў | сярэдні (LOSSY стабы) | сярэдняя | пагаршае cache
+    на момант спрацоўвання, але змяншае колькасць сціскаў
+F3. Incremental summary (дапісваць, не перагенераваць)
+    | R1/R2: сціск перапісвае сярэдзіну і ламае cache | карэннае рашэнне
+    для R1+R2, але патрабуе новай логікі | высокі | высокая | рэзка паляпшае
+F4. Прыбраць 420 s tool-timeout (абмежаваць меншым, паўторы забараніць)
+    | 1 выпадак 420,0 s | -7 хвілін у worst turn | нізкі | нізкая | не ўплывае
+F5. Закрываць старыя Chromium renderer (уцечка: 13 працэсаў)
+    | ps: ~1,6 GiB у 4,66 GiB cgroup; load 34 | вызваляе ~1–1,5 GiB | сярэдні
+    (можа перарваць актыўную browser-сесію) | нізкая | не ўплывае
+F6. Скараціць набор тулсетаў у сістэмным промпце (21 → фактычна патрэбныя)
+    | сістэмны промпт 45 111 сімвалаў (~11k токенаў кожны выклік) | памяншае
+    ўвод і ціск на cache | сярэдні (можа прыбраць патрэбны tool) | нізкая | паляпшае
+
+MIНIMAL SAFE PATCH SET (прапанова, НЕ прымянялася): F1 + F4.
+  F1 не змяняе ніводнага парога і не выдаляе змесціва — толькі набліжае
+  існуючую праверку да пачатку шляху. F4 зніжае столю таймаўту.
+  F2/F3/F5/F6 патрабуюць асобных замераў і НЕ ўваходзяць у мінімальны набор.
+
+===========================================================
+13. VALIDATION PLAN (калі будзе дазвол на змены)
+===========================================================
+1) Да/пасля на адным тыпе тура: no-compression / near-threshold / compression /
+   tool-heavy / browser — па 3 вымярэнні, з логаў (без новай інструментацыі).
+2) Метрыкі: total_duration_ms compression_attempt, колькасць committed/aborted,
+   cache_read_tokens супраць input_tokens, turn wall time.
+3) Праверыць, што колькасць no_progress-абарт не вырасла, а час сумарны ўпаў.
+4) Telegram: хуткасць першага бачнага адказу (streaming.transport=edit).
+
+===========================================================
+14. ROLLBACK PLAN
+===========================================================
+Змены — у адным commit; вяртанне = revert commit + redeploy Railway.
+Канфіг не змяняецца, таму адкат — чыста аднаўленне коду.
+Точка вяртання: бягучы HEAD (d62f91e), зафіксаваць перад любымі зменамі.
+
+===========================================================
+15. ШТО НЕ ЗРОБЛЕНА (сумленна)
+===========================================================
+· Не вымераны TTFB і TPS самога DeepSeek (патрабуе сеткавага замеру — забаронена
+  «NO LLM CALLS» / не рабілася, каб не расходваць бюджэт).
+· Не правяраліся tail_mode=legacy, іншая auxiliary-мадэль, вышэйшы threshold.
+· Не знойдзены EXACT-станы перад сціскам (у БД іх няма).
+· Agentic coding НЕ запускаўся: любы push у main = аўтадэплой production.
+
+READ-ONLY AUDIT ONLY. NO CODE CHANGES. NO CONFIG CHANGES. NO COMMIT. NO PUSH.
+NO REDEPLOY. NO RESTART. NO DATABASE WRITES. NO SESSION MUTATION. NO CACHE MUTATION.
