@@ -33,7 +33,7 @@ done
 if [ -n "$PROVIDER_KEYS" ]; then
     echo "   Detected provider keys:${PROVIDER_KEYS}"
 else
-    echo "   WARNING: No Nous provider key detected (NOUS_PORTAL_TOKEN or NOUS_API_KEY)."
+    echo "   WARNING: No inference provider key detected (DEEPSEEK_API_KEY, NOUS_PORTAL_TOKEN, or NOUS_API_KEY)."
 fi
 
 echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" >> "$ENV_FILE"
@@ -369,12 +369,14 @@ echo ""
 echo "┌─────────────────────────────────────────────────────"
 echo "│  HERMES STARTUP DIAGNOSTIC"
 echo "├─────────────────────────────────────────────────────"
-if [ -n "$NOUS_PORTAL_TOKEN" ]; then
+if [ -n "$DEEPSEEK_API_KEY" ]; then
+    echo "│  Provider : DeepSeek (DEEPSEEK_API_KEY set)"
+elif [ -n "$NOUS_PORTAL_TOKEN" ]; then
     echo "│  Provider : Nous Portal (NOUS_PORTAL_TOKEN set)"
 elif [ -n "$NOUS_API_KEY" ]; then
     echo "│  Provider : Nous API (NOUS_API_KEY set)"
 else
-    echo "│  Provider : ⚠ NONE — no Nous key found"
+    echo "│  Provider : ⚠ NONE — no inference provider key found"
 fi
 SQLITE_VER=$(/opt/hermes/venv/bin/python -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
 echo "│  SQLite   : $SQLITE_VER"
@@ -402,7 +404,7 @@ echo "│  Hard stop: HERMES_TOOL_LOOP_HARD_STOP=${HERMES_TOOL_LOOP_HARD_STOP}"
 echo "│  TG init  : ${HERMES_TELEGRAM_INIT_TIMEOUT}s timeout"
 echo "│  Gateway  : polling mode (one replica)"
 echo "│  RL fix   : drain=${HERMES_DRAIN_TIMEOUT_SECONDS}s backoff=${HERMES_RATE_LIMIT_BACKOFF_BASE}s retries=${HERMES_RATE_LIMIT_MAX_RETRIES}"
-echo "│  Primary  : deepseek/deepseek-v4-flash-0731"
+echo "│  Primary  : deepseek-flash (provider=deepseek, streaming=false)"
 echo "│  Fallback : stepfun→poolside→meituan→upstage"
 echo "│  Toolset  : hermes-telegram (a2a renamed)"
 echo "│  Title gen: DISABLED"
