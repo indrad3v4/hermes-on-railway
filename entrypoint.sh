@@ -385,6 +385,18 @@ echo "   ✓ aux vision ($VIS_PROV/$VIS_MODEL) + STT (local turbo) + /pwa alias 
 /opt/hermes/venv/bin/hermes config set compression.micro_compact false >/dev/null 2>&1 || echo "   ⚠ failed: compression.micro_compact"
 echo "   ✓ context: working set capped at 80k tokens; per-turn micro-compaction off"
 
+# ── firecrawl-mcp parked (measured 2026-09-18) ───────────────────────────
+# It crashes on every start: ModuleNotFoundError: No module named
+# 'mcp.server.fastmcp' — mcp 2.x renamed FastMCP to MCPServer. mcp-stderr.log
+# holds 54 start cycles and each turn paid 3 connection attempts + backoff
+# ("failed initial connection after 3 attempts, parking") before giving up.
+# Nothing in the Telegram workflow uses it: web work goes through the local
+# browser/CDP and the Firebrowsing skill. Parked, not deleted — the script and
+# the skill stay in place, so re-enabling is one config set once the import is
+# ported to MCPServer.
+/opt/hermes/venv/bin/hermes config set mcp_servers.firecrawl-mcp.enabled false >/dev/null 2>&1 || echo "   ⚠ failed: mcp_servers.firecrawl-mcp.enabled"
+echo "   ✓ mcp: firecrawl-mcp parked (crashes on mcp 2.x; 3 failed connects per turn)"
+
 # ── Thread/resource diagnostics ─────────────────────────────────────────
 echo ""
 echo "┌─────────────────────────────────────────────────────"
