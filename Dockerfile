@@ -20,6 +20,18 @@ RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/he
     git -C /opt/hermes fetch --depth 1 origin "$HERMES_REF" && \
     git -C /opt/hermes checkout --detach FETCH_HEAD
 
+# ── Latency patches (repo-local, applied after the pinned clone) ────────
+# These patches are written against HERMES_REF above. If HERMES_REF moves,
+# git apply fails loudly and the build STOPS — better a broken build than a
+# silently unpatched engine. Semantics of the container this patch layer
+# cannot reach (Railway env, entrypoint rewrites) are documented in
+# OPERATIONS.md. Rollback: remove the patch file and redeploy.
+COPY patches/latency-*.patch /opt/latency-patches/
+RUN for p in /opt/latency-patches/*.patch; do \
+      echo "applying $p" && git -C /opt/hermes apply --verbose "$p"; \
+    done && \
+    git -C /opt/hermes diff --stat
+
 RUN uv python install 3.12 && \
     uv venv --python 3.12 /opt/hermes/venv && \
     uv pip install --python /opt/hermes/venv/bin/python --no-cache \

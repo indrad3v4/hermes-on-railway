@@ -1,0 +1,79 @@
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index ac32a6fc..6648bc15 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -1679,7 +1679,10 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
+             "current_estimated_tokens": _safe_int(current_tokens),
+             "effective_threshold": _safe_int(self.threshold_tokens), "protected_head_tokens": None,
+             "protected_tail_tokens": None, "middle_window_tokens": None, "prellm_skip_count": 0,
++            "deterministic_reclaim_estimate": None,
++            "ineffective_compression_count": int(getattr(self, "_ineffective_compression_count", 0) or 0),
+             "aux_prompt_tokens": None, "aux_output_reservation": None, "aux_provider": "", "aux_model": "",
++            "aux_input_tokens": None, "aux_output_tokens": None, "aux_duration_ms": None,
+             "effective_aux_context": None, "fit_margin": None, "chunking": False, "chunk_count": 0,
+             "total_duration_ms": None, "aux_call_duration_ms": None, "queue_wait_ms": None, "prompt_build_ms": None,
+             "time_to_first_progress_ms": None, "summary_generation_ms": None, "commit_ms": None,
+@@ -1718,6 +1721,8 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
+             telemetry["fit_margin"] = (telemetry["effective_aux_context"] - telemetry["aux_prompt_tokens"]
+                                        - (telemetry["aux_output_reservation"] or 0))
+         telemetry["aux_call_duration_ms"] = (telemetry.get("aux_call_duration_ms") or 0) + max(0, int(duration_ms))
++        # Shadow telemetry (KROK 0): same measurement under the contract's canonical name. Record only.
++        telemetry["aux_duration_ms"] = telemetry["aux_call_duration_ms"]
+         for key in ("queue_wait_ms", "prompt_build_ms", "time_to_first_progress_ms", "summary_generation_ms", "commit_ms"):
+             if not isinstance(phase_timings, dict) or key not in phase_timings:
+                 continue
+@@ -1726,6 +1731,23 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
+             accumulate = key in {"queue_wait_ms", "summary_generation_ms"} and value is not None
+             telemetry[key] = (telemetry.get(key) or 0) + value if accumulate else value
+ 
++    def _record_aux_compression_usage(self, usage: Any) -> None:
++        """Shadow telemetry (KROK 0): record the aux call's ACTUAL token usage, when the
++        provider returned it. Read-only; never feeds a decision. ``usage`` is the response's
++        ``usage`` object (``prompt_tokens``/``completion_tokens``), or ``None`` when omitted."""
++        telemetry = getattr(self, "_active_compression_telemetry", None)
++        if not isinstance(telemetry, dict) or usage is None:
++            return
++
++        def _read(name: str) -> Any:
++            value = getattr(usage, name, None)
++            if value is None and isinstance(usage, dict):
++                value = usage.get(name)
++            return _safe_int(value)
++
++        telemetry["aux_input_tokens"] = _read("prompt_tokens")
++        telemetry["aux_output_tokens"] = _read("completion_tokens")
++
+     def _emit_init_summary_once(self) -> None:
+         """Emit the init log line once, on first context-length resolution (keeps __init__ non-blocking)."""
+         if not getattr(self, "_log_init_summary", False):
+@@ -3225,6 +3247,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
+                 effective_aux_context=self.context_length if route_known and _aux_model == self.model else None,
+                 phase_timings=_latency_info,
+             )
++        # Shadow telemetry (KROK 0): record actual aux token usage when the provider reports it.
++        self._record_aux_compression_usage(getattr(response, "usage", None))
+         if self._compression_cancelled():
+             raise AuxiliaryExplicitCancellation()
+         # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
+@@ -4616,6 +4640,10 @@ Write only the summary body. Do not include any preamble or prefix."""
+             )
+             return messages
+         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
++        # Shadow telemetry (KROK 0): message-only token estimate before the deterministic passes, so
++        # the record can report how much the LLM-free Phase-1 prune + lean demote reclaimed. Same
++        # estimator on both sides; read-only, never feeds a decision.
++        _pre_deterministic_tokens = estimate_messages_tokens_rough(messages)
+         # Phase 1: Prune old tool results (cheap, no LLM call)
+         messages, pruned_count = self._prune_old_tool_results(
+             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=self.tail_token_budget,
+@@ -4644,6 +4672,10 @@ Write only the summary body. Do not include any preamble or prefix."""
+         self._record_compression_regions(
+             head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
+         )
++        # Shadow telemetry (KROK 0): deterministic reclaim measured over the already-run passes above.
++        telemetry["deterministic_reclaim_estimate"] = max(
++            0, _pre_deterministic_tokens - estimate_messages_tokens_rough(messages),
++        )
+         telemetry["chunk_count"] = 1 if turns_to_summarize else 0
+         if not turns_to_summarize:
+             # Window is only handoff rows (#59496): skip the aux call; _previous_summary is KEPT —

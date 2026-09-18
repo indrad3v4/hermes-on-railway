@@ -1,0 +1,24 @@
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 6648bc15..ad6dd784 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -638,8 +638,8 @@ def _next_timeout_cooldown(compressor: Any) -> int:
+ 
+ _MIN_SUMMARY_TOKENS = 2000
+ _SUMMARY_RATIO = 0.20
+-# Summaries above ~10K tokens are themselves a context-pressure source.
+-_SUMMARY_TOKENS_CEILING = 10_000
++# Summaries above ~5K tokens are themselves a context-pressure source.
++_SUMMARY_TOKENS_CEILING = 5_000
+ 
+ # After this many failures at one cursor, skip the exchange to avoid busy-looping.
+ _MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES = 3
+@@ -847,7 +847,7 @@ def _build_recovery_footer(session_id: str, region_len: int) -> str:
+ # from the LLM-free anchor index below.
+ _LEAN_SESSION_LOG_HEADING = "## Detailed Session Log (oldest first)"
+ # Extra output-token guidance for the session-log section (single response).
+-_LEAN_SESSION_LOG_BUDGET_TOKENS = 4_000
++_LEAN_SESSION_LOG_BUDGET_TOKENS = 1_500
+ # Lean-mode prompt section appended to the summary template (byte-pinned prompt text).
+ _LEAN_SESSION_LOG_SECTION = f"""
+ 
